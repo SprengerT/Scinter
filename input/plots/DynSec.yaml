@@ -1,0 +1,11 @@
+width: 1600
+height: 700
+dpi: 100
+bottom: 0.1
+top: 0.9
+left: 0.06
+right: 1.01
+wspace: 0.1
+hspace: 0.2
+plots:
+  - [dynamic_spectrum,secondary_spectrum]

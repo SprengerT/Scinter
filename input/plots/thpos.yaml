@@ -1,0 +1,11 @@
+bottom: 0.1
+dpi: 100
+height: 600
+hspace: 0.2
+left: 0.125
+plots:
+- [theta_positions]
+right: 0.95
+top: 0.9
+width: 600
+wspace: 0.2
