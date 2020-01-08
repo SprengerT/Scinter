@@ -38,9 +38,13 @@ class Scintillation:
         #initiate software tools
         warnings.showwarning = self._warning
         self.yaml = YAML(typ='safe')
+
+        #read user defined settings
+        with open(os.path.join("input","user_settings.yaml"),'r') as readfile:
+            self.user_settings =self.yaml.load(readfile)
         
         #check for directories
-        self.path_data = os.path.join("data",name_data)
+        self.path_data = os.path.join(os.path.join(self.user_settings["output_path"],"data"),name_data)
         if not os.path.exists(self.path_data):
             os.makedirs(self.path_data)
         self.path_plots = os.path.join(self.path_data,"plots")
@@ -54,10 +58,11 @@ class Scintillation:
             os.makedirs(self.path_animations)
             
         #locate paths
+        self.path_dataset = os.path.join(self.user_settings["output_path"],"input")
         self.path_plot_source = os.path.join("input","plots")
            
         #check for parameter logfiles and load them
-        file_input = os.path.join("input",name_data+".yaml")
+        file_input = os.path.join(self.path_dataset,name_data+".yaml")
         file_params = os.path.join(self.path_data,name_data+".yaml")
         if os.path.exists(file_params):
             with open(file_params,'r') as readfile:
@@ -78,20 +83,18 @@ class Scintillation:
                 else:
                    self.yaml.dump({},writefile)
                 
-                
         #check for dynamic spectrum and load it
         name_measurement = dict_params["measurement"]
         file_DynSpec = os.path.join(self.path_data,"DynSpec.npy")
         file_flags = os.path.join(self.path_data,"flags.npy")
         if not (os.path.exists(file_DynSpec) and os.path.exists(file_flags)):
+            warnings.warn("Data processed for the first time! Creating new data directory.")
             measurement = None
             exec "import measurements.{0}".format(name_measurement)
             exec "measurement = measurements.{0}.{0}(self.path_data,dict_params)".format(name_measurement)
             dict_params = measurement.simulate()
             with open(file_params,'w+') as writefile:
                self.yaml.dump(dict_params,writefile)
-        #self.DynSpec = np.load(file_DynSpec)
-        #self.flags = np.load(file_flags)
             
         #create basic objects from the logfile
         # - read input

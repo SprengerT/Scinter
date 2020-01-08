@@ -1,0 +1,2 @@
+#location of produced and processed files (transformed data, specifications, plots)
+output_path: "/homes/tsprenger/Nextcloud/PhD/Code/Scinter2"
