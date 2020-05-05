@@ -1,5 +1,5 @@
-width: 1600
-height: 1200
+width: 1400
+height: 1000
 dpi: 100
 bottom: 0.1
 top: 0.9
@@ -8,4 +8,4 @@ right: 0.95
 wspace: 0.2
 hspace: 0.2
 plots:
-  - [secondary_phase]
+  - [name_of_the_plot]

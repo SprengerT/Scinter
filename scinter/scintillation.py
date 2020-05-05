@@ -1,6 +1,6 @@
 import os
 from ruamel.yaml import YAML
-import warnings
+#import warnings
 import shutil
 import numpy as np
 from numpy import newaxis as na
@@ -8,19 +8,31 @@ from scipy import interpolate
 import progressbar
 import time
 import math
+import scipy
 from scipy import ndimage
 from scipy import signal
 import random as rd
 from scipy.optimize import curve_fit
 import imageio
+from skimage.transform import hough_line, hough_line_peaks
 from skimage.measure import block_reduce
+import skimage
+import skimage.morphology as morphology
+from skimage.restoration import denoise_bilateral, denoise_wavelet
 import matplotlib as mpl
 mpl.use('Agg')
 import matplotlib.pyplot as plt
+import cv2
+from cv2 import fastNlMeansDenoising
+from numpy.ctypeslib import ndpointer
+import ctypes
 
-import scinter.generic_plots
+from scinter.computation import computation as scinter_computation
+from scinter.plot import set_figure
+from scinter.plot import plot as scinter_plot
+from scinter.defined_analyses import defined_analyses
 
-class Scintillation:
+class Scintillation(defined_analyses):
     #Useful constants
     ly =  9460730472580800. #m
     au =      149597870700. #m
@@ -36,7 +48,7 @@ class Scintillation:
         #do not only save the dynamic spectrum but also all underlying parameters
         
         #initiate software tools
-        warnings.showwarning = self._warning
+        #warnings.showwarning = self._warning
         self.yaml = YAML(typ='safe')
 
         #read user defined settings
@@ -60,6 +72,7 @@ class Scintillation:
         #locate paths
         self.path_dataset = os.path.join(self.user_settings["output_path"],"input")
         self.path_plot_source = os.path.join("input","plots")
+        self.path_c_source = os.path.join("scinter","c_source")
            
         #check for parameter logfiles and load them
         file_input = os.path.join(self.path_dataset,name_data+".yaml")
@@ -67,7 +80,8 @@ class Scintillation:
         if os.path.exists(file_params):
             with open(file_params,'r') as readfile:
                 dict_params =self.yaml.load(readfile)
-            warnings.warn("Loading existing parameters instead of input file.")
+            #warnings.warn("Loading existing parameters instead of input file.")
+            self._warning("Loading existing parameters instead of input file.")
         else:
             with open(file_input,'r') as readfile:
                 dict_params =self.yaml.load(readfile)   
@@ -88,10 +102,10 @@ class Scintillation:
         file_DynSpec = os.path.join(self.path_data,"DynSpec.npy")
         file_flags = os.path.join(self.path_data,"flags.npy")
         if not (os.path.exists(file_DynSpec) and os.path.exists(file_flags)):
-            warnings.warn("Data processed for the first time! Creating new data directory.")
-            measurement = None
-            exec "import measurements.{0}".format(name_measurement)
-            exec "measurement = measurements.{0}.{0}(self.path_data,dict_params)".format(name_measurement)
+            self._warning("Data processed for the first time! Creating new data directory.")
+            vars_from_exec = {"self":self,"dict_params":dict_params}
+            exec("import measurements.{0}\nmeasurement = measurements.{0}.{0}(self.path_data,dict_params)".format(name_measurement), vars_from_exec)
+            measurement = vars_from_exec["measurement"]
             dict_params = measurement.simulate()
             with open(file_params,'w+') as writefile:
                self.yaml.dump(dict_params,writefile)
@@ -109,12 +123,20 @@ class Scintillation:
         self.t = np.linspace(0.,self.timespan,num=self.N_t,endpoint=True)
         self.nu = np.linspace(self.nu_min,self.nu_min+self.bandwidth,num=self.N_nu,endpoint=True)
         # - deduce useful quantities
-        self.t_half = self.t[self.N_t/2]
-        self.nu_half = self.nu[self.N_nu/2]
+        self.t_half = self.t[int(self.N_t/2)]
+        self.nu_half = self.nu[int(self.N_nu/2)]
         self.delta_t = self.t[1]-self.t[0]
         self.delta_nu = self.nu[1]-self.nu[0]
         self.nu_max = self.nu[-1]
         self.t_max = self.t[-1]
+        # - create dictionaries to share with other classes
+        self.dict_paths = {}
+        self.dict_paths.update({'computations':self.path_computations,'data':self.path_data,'c_source':self.path_c_source})
+        self.dict_base = {}
+        self.dict_base.update({'N_p':self.N_p,'N_t':self.N_t,'N_nu':self.N_nu})
+        self.dict_base.update({'t':self.t,'nu':self.nu})
+        self.dict_base.update({'t_half':self.t_half,'nu_half':self.nu_half})
+        self.dict_base.update({'delta_t':self.delta_t,'delta_nu':self.delta_nu})
             
     def _warning(self,message,category = UserWarning,filename = '',lineno = -1):
         warn_message = '/!\\ ' + str(message)
@@ -153,24 +175,17 @@ class Scintillation:
                 path_obj = os.path.join(path_load,obj)
                 name,extension = obj.split("_{0}".format(name_load))
                 newname = name + extension
-                file_dest = os.path.join(path_computation,newname)
+                file_dest = os.path.join(self.path_computations,name_save,newname)
                 shutil.copy(path_obj,file_dest)
         else:
             #execute computation
-            try:
-                exec "self.compute_{0}('{1}')".format(name_save,path_computation)
-                return 1
-            except:
-                warnings.warn("The computation of {0} is not defined in scinter/scintillation.py or contains a bug!".format(name_save))
-            print "Will try again: self.compute_{0}('{1}')".format(name_save,path_computation)
-            exec "self.compute_{0}('{1}')".format(name_save,path_computation)
+            computation = scinter_computation(self.dict_paths,name_save,dict_base=self.dict_base)
+            computation.compute()
+            return 1
     
     def plot(self,name_save,name_archive,name_load):
         #load specifications
         file_plot_class = os.path.join(self.path_plot_source,"{0}.yaml".format(name_save))
-        if not os.path.exists(file_plot_class):
-            warnings.warn("The plot {0} is not defined in input/plots!".format(name_save))
-            return 0
         
         #check for directories and files
         path_plot = os.path.join(self.path_plots,name_save)
@@ -178,9 +193,19 @@ class Scintillation:
             os.makedirs(path_plot)
         file_plot_specs = os.path.join(path_plot,"{0}.yaml".format(name_save))
         if not os.path.exists(file_plot_specs):
-            shutil.copyfile(file_plot_class,file_plot_specs)
+            if not os.path.exists(file_plot_class):
+                self._warning("The plot {0} is not defined in input/plots! Attempting to use the standard_single_plot instead...".format(name_save))
+                file_plot_class = os.path.join(self.path_plot_source,"standard_single_plot.yaml")
+                shutil.copyfile(file_plot_class,file_plot_specs)
+                with open(file_plot_specs,"r") as readfile:
+                    text = readfile.read()
+                    text = text.replace('name_of_the_plot',name_save)
+                with open(file_plot_specs,"w") as writefile:
+                    writefile.write(text)
+            else:
+                shutil.copyfile(file_plot_class,file_plot_specs)
         else:
-            warnings.warn("The plot {0} already exists and will be overwritten according to the settings found.".format(name_save))
+            self._warning("The plot {0} already exists and will be overwritten according to the settings found.".format(name_save))
             
         #archive previous results
         if not name_archive==None:
@@ -202,7 +227,7 @@ class Scintillation:
             path_load = os.path.join(path_plot,name_load)
             print("Loading previous results from {0}".format(path_load))
             if not os.path.exists(path_load):
-                warnings.warn("{0} does not exist! Cannot load archived results.")
+                self._warning("{0} does not exist! Cannot load archived results.")
                 return 0
             list_objects = os.listdir(path_load)
             for obj in list_objects:
@@ -216,31 +241,62 @@ class Scintillation:
             with open(file_plot_specs,'r') as readfile:
                 dict_plot =self.yaml.load(readfile)
                 
+            #set up matplotlib
+            textsize = self._add_specification("textsize",14,dict_plot)
+            labelsize = self._add_specification("labelsize",16,dict_plot)
+            # - enter specifications
+            set_figure(textsize,labelsize)
+                
             #set up the canvas
             plt.clf()
             figure, ax = plt.subplots(len(dict_plot["plots"]),len(dict_plot["plots"][0]),figsize=(dict_plot["width"]/dict_plot["dpi"],dict_plot["height"]/dict_plot["dpi"]),dpi=dict_plot["dpi"])
             plt.subplots_adjust(bottom=dict_plot["bottom"],top=dict_plot["top"],left=dict_plot["left"],right=dict_plot["right"],wspace=dict_plot["wspace"],hspace=dict_plot["hspace"])
-            
-            #draw the subplots
+
+            #create plot defining lists
+            plot_names = []
+            tags = []
+            axes = []
             if (len(dict_plot["plots"][0])==1 and len(dict_plot["plots"])==1):
-                tag = ""
-                exec "self.plot_{0}(dict_plot,figure,ax,tag)".format(dict_plot["plots"][0][0])
+                plot_names.append(dict_plot["plots"][0][0])
+                tags.append("")
+                axes.append(ax)
             elif len(dict_plot["plots"][0])==1:
                 for i_row,row in enumerate(dict_plot["plots"]):
-                    tag = "_{0}".format(i_row)
-                    exec "self.plot_{0}(dict_plot,figure,ax[{1}],tag)".format(row[0],i_row)
+                    plot_names.append(row[0])
+                    tags.append("_{0}".format(i_row))
+                    axes.append(ax[i_row])
             elif len(dict_plot["plots"])==1:
                 for i_col,name_plot in enumerate(dict_plot["plots"][0]):
-                    tag = "_{0}".format(i_col)
-                    exec "self.plot_{0}(dict_plot,figure,ax[{1}],tag)".format(name_plot,i_col)
+                    plot_names.append(name_plot)
+                    tags.append("_{0}".format(i_col))
+                    axes.append(ax[i_col])
             else:
                 for i_row,row in enumerate(dict_plot["plots"]):
                     for i_col,name_plot in enumerate(row):
-                        tag = "_{0}_{1}".format(i_row,i_col)
-                        exec "self.plot_{0}(dict_plot,figure,ax[{1},{2}],tag)".format(name_plot,i_row,i_col)
+                        plot_names.append(name_plot)
+                        tags.append("_{0}_{1}".format(i_row,i_col))
+                        axes.append(ax[i_row,i_col])
+                        
+            #draw the subplots
+            for i_plot,name_plot in enumerate(plot_names):
+                key_specs = "plot_{0}{1}".format(name_plot,tags[i_plot])
+                if not key_specs in dict_plot:
+                    dict_plot.update({key_specs:{}})
+                dict_subplot = dict_plot[key_specs]
+                plot = scinter_plot(name_plot,tags[i_plot],dict_subplot)
+                list_category = []
+                list_data = []
+                exec("self.{0}(dict_subplot,list_category,list_data)".format(name_plot))
+                # - save intermediate specifications to allow for adaption in case of failed plotting
+                with open(file_plot_specs,'w+') as writefile:
+                    self.yaml.dump(dict_plot,writefile)
+                # - finally plot the data
+                plot.plot(list_category,list_data,figure,axes[i_plot])
+                dict_plot.update({key_specs:plot.dict_subplot})
             
             #save the plot
             figure.savefig(os.path.join(path_plot,"{0}.png".format(name_save)))
+            #figure.savefig(os.path.join(path_plot,"{0}.jpg".format(name_save)))
             plt.clf()
             
             #overwrite dict_plot to incorporate all settings of the subplots
@@ -250,9 +306,6 @@ class Scintillation:
     def animate(self,name_save,name_archive,name_load):
         #load specifications
         file_plot_class = os.path.join(self.path_plot_source,"{0}.yaml".format(name_save))
-        if not os.path.exists(file_plot_class):
-            warnings.warn("The plot {0} is not defined in input/plots!".format(name_save))
-            return 0
         
         #check for directories and files
         path_anim = os.path.join(self.path_animations,name_save)
@@ -260,15 +313,27 @@ class Scintillation:
             os.makedirs(path_anim)
         file_anim_specs = os.path.join(path_anim,"{0}.yaml".format(name_save))
         if not os.path.exists(file_anim_specs):
-            with open(file_plot_class,'r') as readfile:
-                dict_plot =self.yaml.load(readfile)
+            if not os.path.exists(file_plot_class):
+                self._warning("The plot {0} is not defined in input/plots! Attempting to use the standard_single_plot instead...".format(name_save))
+                file_plot_class = os.path.join(self.path_plot_source,"standard_single_plot.yaml")
+                shutil.copyfile(file_plot_class,file_anim_specs)
+                with open(file_anim_specs,"r") as readfile:
+                    text = readfile.read()
+                    text = text.replace('name_of_the_plot',name_save)
+                with open(file_anim_specs,"w") as writefile:
+                    writefile.write(text)
+                with open(file_anim_specs,'r') as readfile:
+                    dict_plot = self.yaml.load(readfile)
+            else:
+                with open(file_plot_class,'r') as readfile:
+                    dict_plot = self.yaml.load(readfile)
             dict_anim = {}
             dict_anim.update({"iteration": {"N_iter":1,"t_frame":0.2}})
             dict_anim.update({"masterplot":dict_plot})
             with open(file_anim_specs,'w+') as writefile:
                self.yaml.dump(dict_anim,writefile)
         else:
-            warnings.warn("The animation {0} already exists and will be overwritten according to the settings found.".format(name_save))
+            self._warning("The animation {0} already exists and will be overwritten according to the settings found.".format(name_save))
             
         #archive previous results
         if not name_archive==None:
@@ -317,7 +382,10 @@ class Scintillation:
                 figure, ax = plt.subplots(len(dict_plot["plots"]),len(dict_plot["plots"][0]),figsize=(dict_plot["width"]/dict_plot["dpi"],dict_plot["height"]/dict_plot["dpi"]),dpi=dict_plot["dpi"])
                 plt.subplots_adjust(bottom=dict_plot["bottom"],top=dict_plot["top"],left=dict_plot["left"],right=dict_plot["right"],wspace=dict_plot["wspace"],hspace=dict_plot["hspace"])
                 
-                #draw the subplots
+                #create plot defining lists
+                plot_names = []
+                tags = []
+                axes = []
                 if (len(dict_plot["plots"][0])==1 and len(dict_plot["plots"])==1):
                     tag = ""
                     key_plot = "plot_{0}{1}".format(dict_plot["plots"][0][0],tag)
@@ -326,7 +394,9 @@ class Scintillation:
                             if key_plot in dict_plot:
                                 frame_value = dict_iter[key_plot][key][i_frame]
                                 dict_plot[key_plot].update({key:frame_value})
-                    exec "self.plot_{0}(dict_plot,figure,ax,tag)".format(dict_plot["plots"][0][0])
+                    plot_names.append(dict_plot["plots"][0][0])
+                    tags.append(tag)
+                    axes.append(ax)
                 elif len(dict_plot["plots"][0])==1:
                     for i_row,row in enumerate(dict_plot["plots"]):
                         tag = "_{0}".format(i_row)
@@ -336,7 +406,9 @@ class Scintillation:
                                 if key_plot in dict_plot:
                                     frame_value = dict_iter[key_plot][key][i_frame]
                                     dict_plot[key_plot].update({key:frame_value})
-                        exec "self.plot_{0}(dict_plot,figure,ax[{1}],tag)".format(row[0],i_row)
+                        plot_names.append(row[0])
+                        tags.append(tag)
+                        axes.append(ax[i_row])
                 elif len(dict_plot["plots"])==1:
                     for i_col,name_plot in enumerate(dict_plot["plots"][0]):
                         tag = "_{0}".format(i_col)
@@ -346,7 +418,9 @@ class Scintillation:
                                 if key_plot in dict_plot:
                                     frame_value = dict_iter[key_plot][key][i_frame]
                                     dict_plot[key_plot].update({key:frame_value})
-                        exec "self.plot_{0}(dict_plot,figure,ax[{1}],tag)".format(name_plot,i_col)
+                        plot_names.append(name_plot)
+                        tags.append(tag)
+                        axes.append(ax[i_col])
                 else:
                     for i_row,row in enumerate(dict_plot["plots"]):
                         for i_col,name_plot in enumerate(row):
@@ -357,7 +431,27 @@ class Scintillation:
                                     if key_plot in dict_plot:
                                         frame_value = dict_iter[key_plot][key][i_frame]
                                         dict_plot[key_plot].update({key:frame_value})
-                            exec "self.plot_{0}(dict_plot,figure,ax[{1},{2}],tag)".format(name_plot,i_row,i_col)
+                            plot_names.append(name_plot)
+                            tags.append(tag)
+                            axes.append(ax[i_row,i_col])
+                            
+                #draw the subplots
+                for i_plot,name_plot in enumerate(plot_names):
+                    key_specs = "plot_{0}{1}".format(name_plot,tags[i_plot])
+                    if not key_specs in dict_plot:
+                        dict_plot.update({key_specs:{}})
+                    dict_subplot = dict_plot[key_specs]
+                    plot = scinter_plot(name_plot,tags[i_plot],dict_subplot)
+                    list_category = []
+                    list_data = []
+                    exec("self.{0}(dict_subplot,list_category,list_data)".format(name_plot))
+                    # - save intermediate specifications to allow for adaption in case of failed plotting
+                    dict_anim["masterplot"].update(dict_plot)
+                    with open(file_anim_specs,'w+') as writefile:
+                       self.yaml.dump(dict_anim,writefile)
+                    # - finally plot the data
+                    plot.plot(list_category,list_data,figure,axes[i_plot])
+                    dict_plot.update({key_specs:plot.dict_subplot})
                 
                 #save the plot
                 figure.savefig(os.path.join(path_anim,"{0}_{1}.png".format(name_save,i_frame)))
@@ -376,41 +470,19 @@ class Scintillation:
                     image = imageio.imread(filename)
                     writer.append_data(image) 
     
-    def remove(self,name_save):
-        #it doesnt work like this anymore because of split into plots and results folder -> REDO!
-        #correct it
-        delete_all = False
-        if name_save == "all":
-            delete_all = True
-        #delete the selected subdirectory
-        path_save = os.path.join(self.path_data,name_save)
-        if os.path.exists(path_save):
-            shutil.rmtree(path_save)
-            warnings.warn("{0} and all results within are removed!".format(path_save))
-        else:
-            warnings.warn("{0} does not exist!".format(path_save))
-        
-        #if it was the only subdirectory, ask if the whole directory belonging to
-        #this data set shall be removed
-        list_dir = os.listdir(self.path_data)
-        subdirectories_exist = False
-        for f in list_dir:
-            path_file = os.path.join(self.path_data, f)
-            if not os.path.isfile(path_file):
-                if delete_all:
-                    shutil.rmtree(path_file)
-                    warnings.warn("{0} and all results within are removed.".format(path_file))
-                else:
-                    subdirectories_exist = True
-                    break
-        if not subdirectories_exist:
-            warnings.warn("{0} does not contain any saved results.".format(self.path_data))
-            decision = ""
-            while decision != "y" and decision != "n":
-                decision = raw_input("Do you want to remove {0}? (y/n): ".format(self.path_data))
-            if decision == "y":
-                shutil.rmtree(self.path_data)
-                warnings.warn("{0} and all results within are removed.".format(self.path_data))
+    def _add_specification(self,spec_name,spec_value,dict_current):
+        #log standard value if not yet existent and read current value
+        if spec_name not in dict_current:
+            dict_current.update({spec_name:spec_value})
+        return dict_current[spec_name]
+    
+    def _load_base_file(self,file_name):
+        file_base = os.path.join(self.path_data,"{0}.npy".format(file_name))
+        return np.load(file_base)
+    
+    def _load_c_lib(self,file_name):
+        file_c = os.path.join(self.path_c_source,"{0}.so".format(file_name))
+        return ctypes.CDLL(file_c)
                 
 #-----POSITIONS-----
                 
@@ -443,188 +515,8 @@ class Scintillation:
         print("Successfully plotted positions of telescopes on earth.")
                 
 #-----DYNAMIC SPECTRUM-----
-                
-    def plot_dynamic_spectrum(self,dict_plot,figure,ax,tag):
-        #load and check data
-        DynSpec = np.load(os.path.join(self.path_data,"DynSpec.npy"))
-        
-        #load specifications
-        key_sepcs = "plot_dynamic_spectrum{0}".format(tag)
-        if not key_sepcs in dict_plot:
-            dict_subplot = {"cmap":'viridis',"vmin":-1.,"vmax":float(np.max(np.real(DynSpec))),"t_min":float(self.t_min),"t_max":float(self.t_max),"nu_min":float(self.nu_min),"nu_max":float(self.nu_max),
-                            "telescope1":0,"telescope2":0,"title":"dynamic spectrum","t_sampling":1,"nu_sampling":1} # $I$ [$W/m^2$]
-            dict_plot.update({key_sepcs:dict_subplot})
-        else:
-            dict_subplot = dict_plot[key_sepcs]
-        
-        #Preprocess data
-        # - read in specifications
-        tel1 = dict_subplot["telescope1"]
-        tel2 = dict_subplot["telescope2"]
-        # - cut off out of range data
-        min_index_t = 0
-        max_index_t = len(self.t)-1
-        for index_t in range(len(self.t)):
-            if self.t[index_t]<dict_subplot["t_min"]:
-                min_index_t = index_t
-            elif self.t[index_t]>dict_subplot["t_max"]:
-                max_index_t = index_t
-                break
-        t = self.t[min_index_t:max_index_t+2]
-        min_index_nu = 0
-        max_index_nu = len(self.nu)-1
-        for index_nu in range(len(self.nu)):
-            if self.nu[index_nu]<dict_subplot["nu_min"]:
-                min_index_nu = index_nu
-            elif self.nu[index_nu]>dict_subplot["nu_max"]:
-                max_index_nu = index_nu
-                break
-        nu = self.nu[min_index_nu:max_index_nu+2]
-        DynSpectrum = np.real(DynSpec[tel1,tel2,min_index_t:max_index_t+2,min_index_nu:max_index_nu+2])
-        # - downsampling
-        t_sampling = dict_subplot["t_sampling"]
-        nu_sampling = dict_subplot["nu_sampling"]
-        DynSpectrum = block_reduce(DynSpectrum, block_size=(t_sampling,nu_sampling), func=np.mean)
-        coordinates = np.array([t,t])
-        coordinates = block_reduce(coordinates, block_size=(1,t_sampling), func=np.mean, cval=t[-1])
-        t = coordinates[0,:]
-        coordinates = np.array([nu,nu])
-        coordinates = block_reduce(coordinates, block_size=(1,nu_sampling), func=np.mean, cval=nu[-1])
-        nu = coordinates[0,:]
-        # - compute offsets to center pccolormesh
-        offset_t = (t[1]-t[0])/2.
-        offset_nu = (nu[1]-nu[0])/2.
-        
-        #draw the plot
-        ax.set_xlim([dict_subplot["t_min"],dict_subplot["t_max"]])
-        ax.set_ylim([dict_subplot["nu_min"],dict_subplot["nu_max"]])
-        im = ax.pcolormesh(t-offset_t,nu-offset_nu,map(list, zip(*DynSpectrum)),cmap=dict_subplot["cmap"],vmin=dict_subplot["vmin"],vmax=dict_subplot["vmax"])
-        figure.colorbar(im, ax=ax)
-        ax.set_title(dict_subplot["title"])
-        ax.set_xlabel(r"time $t$ [$s$]")
-        ax.set_ylabel(r"frequency $\nu$ [Hz]")
-        
-        print("Successfully plotted dynamic spectrum.")
         
 #-----SECONDARY SPECTRUM-----
-                
-    def compute_secondary_spectrum(self,path_computation):
-        #load and check data
-        DynSpec = np.load(os.path.join(self.path_data,"DynSpec.npy"))
-        flags = np.load(os.path.join(self.path_data,"flags.npy"))
-        
-        #define files to compute
-        file_power = os.path.join(path_computation,"secondary_spectrum.npy")
-        file_cross = os.path.join(path_computation,"secondary_cross_spectrum.npy")
-        file_doppler = os.path.join(path_computation,"doppler.npy")
-        file_delay = os.path.join(path_computation,"delay.npy")
-        
-        #create containers
-        SecSpec = np.zeros((self.N_p,self.N_p,self.N_t,self.N_nu),dtype=float)
-        SecCrossSpec = np.zeros((self.N_p,self.N_p,self.N_t,self.N_nu),dtype=np.complex)
-        f_t = np.linspace(-math.pi/self.delta_t,math.pi/self.delta_t,num=self.N_t,endpoint=False)
-        f_nu = np.linspace(-math.pi/self.delta_nu,math.pi/self.delta_nu,num=self.N_nu,endpoint=False)
-        
-        #perform the computation
-        time_start = time.time()
-        print("Computing secondary spectrum ...")
-        # - remove flagged data
-        DynSpec[:,:,flags] = 0.
-        # - compute the power spectrum
-        A_DynSpec = np.fft.fft2(DynSpec,axes=(2,3))
-        A_DynSpec = np.fft.fftshift(A_DynSpec,axes=(2,3))
-        SecSpec = self.delta_nu**2*self.delta_t**2*np.abs(A_DynSpec)**2
-        # - compute the cross spectrum
-        A_flipped = np.roll(np.flip(A_DynSpec,axis=(2,3)),1,axis=(2,3))
-        SecCrossSpec = self.delta_nu**2*self.delta_t**2*A_DynSpec*A_flipped
-        
-        #save the results
-        np.save(file_power,SecSpec)
-        np.save(file_cross,SecCrossSpec)
-        np.save(file_doppler,f_t)
-        np.save(file_delay,f_nu)
-        
-        time_current = time.time()-time_start
-        print("{0}s: Successfully computed the secondary spectrum.".format(time_current))
-        
-    def plot_secondary_spectrum(self,dict_plot,figure,ax,tag):
-        #load and check data
-        # - secondary spectrum
-        path_computation = os.path.join(self.path_computations,"secondary_spectrum")
-        if not os.path.exists(path_computation):
-            warnings.warn("You need to run 'compute secondary_spectrum' first!")
-            return 0
-        file_power = os.path.join(path_computation,"secondary_spectrum.npy")
-        file_doppler = os.path.join(path_computation,"doppler.npy")
-        file_delay = os.path.join(path_computation,"delay.npy")
-        SecSpec = np.load(file_power)
-        f_t = np.load(file_doppler)
-        f_nu = np.load(file_delay)
-        
-        #load specifications
-        key_sepcs = "plot_secondary_spectrum{0}".format(tag)
-        if not key_sepcs in dict_plot:
-            dict_subplot = {"cmap":'viridis',"vmin":0.,"vmax":float(np.max(np.real(SecSpec))),"f_t_min":float(-1./2./self.delta_t),"f_t_max":float(1./2./self.delta_t),"f_nu_min":0.,"f_nu_max":float(1./2./self.delta_nu),
-                            "telescope1":0,"telescope2":0,"title":"secondary spectrum (log10)","f_t_sampling":1,"f_nu_sampling":1} # $P$ [$(W/m^2)^2$]
-            dict_plot.update({key_sepcs:dict_subplot})
-        else:
-            dict_subplot = dict_plot[key_sepcs]
-        
-        #Preprocess data
-        # - sparate 2pi from the Fourier frequency
-        f_t /= 2.*math.pi
-        f_nu /= 2.*math.pi
-        # - read in specifications
-        tel1 = dict_subplot["telescope1"]
-        tel2 = dict_subplot["telescope2"]
-        min_index_t = 0
-        max_index_t = len(f_t)-1
-        for index_t in range(len(f_t)):
-            if f_t[index_t]<dict_subplot["f_t_min"]:
-                min_index_t = index_t
-            elif f_t[index_t]>dict_subplot["f_t_max"]:
-                max_index_t = index_t
-                break
-        f_t = f_t[min_index_t:max_index_t+1]
-        min_index_nu = 0
-        max_index_nu = len(f_nu)-1
-        for index_nu in range(len(f_nu)):
-            if f_nu[index_nu]<dict_subplot["f_nu_min"]:
-                min_index_nu = index_nu
-            elif f_nu[index_nu]>dict_subplot["f_nu_max"]:
-                max_index_nu = index_nu
-                break
-        f_nu = f_nu[min_index_nu:max_index_nu+1]
-        SecSpec = SecSpec[tel1,tel2,min_index_t:max_index_t+1,min_index_nu:max_index_nu+1]
-        # - downsampling
-        f_t_sampling = dict_subplot["f_t_sampling"]
-        f_nu_sampling = dict_subplot["f_nu_sampling"]
-        SecSpec = block_reduce(SecSpec, block_size=(f_t_sampling,f_nu_sampling), func=np.mean)
-        coordinates = np.array([f_t,f_t])
-        coordinates = block_reduce(coordinates, block_size=(1,f_t_sampling), func=np.mean, cval=f_t[-1])
-        f_t = coordinates[0,:]
-        coordinates = np.array([f_nu,f_nu])
-        coordinates = block_reduce(coordinates, block_size=(1,f_nu_sampling), func=np.mean, cval=f_nu[-1])
-        f_nu = coordinates[0,:]
-        # - compute offsets to center pccolormesh
-        offset_f_t = (f_t[1]-f_t[0])/2.
-        offset_f_nu = (f_nu[1]-f_nu[0])/2.
-        # - safely remove zeros if there are any
-        min_nonzero = np.min(SecSpec[np.nonzero(SecSpec)])
-        SecSpec[SecSpec == 0] = min_nonzero
-        # - apply logarithmic scale
-        SecSpec_log10 = np.log10(SecSpec)
-        
-        #draw the plot
-        ax.set_xlim([dict_subplot["f_t_min"],dict_subplot["f_t_max"]])
-        ax.set_ylim([dict_subplot["f_nu_min"],dict_subplot["f_nu_max"]])
-        im = ax.pcolormesh(f_t-offset_f_t,f_nu-offset_f_nu,map(list, zip(*SecSpec_log10)),cmap=dict_subplot["cmap"],vmin=dict_subplot["vmin"],vmax=dict_subplot["vmax"])
-        figure.colorbar(im, ax=ax)
-        ax.set_title(dict_subplot["title"])
-        ax.set_xlabel(r"Doppler $f_t$ [Hz]") #(r"$f_x$ [au]") #
-        ax.set_ylabel(r"Delay $f_{\nu}$ [$s$]") #(r"$f_y$ [au]") #
-        
-        print("Successfully plotted secondary spectrum.")
         
     def plot_secondary_cross_spectrum(self,dict_plot,figure,ax,tag):
         #load and check data
@@ -758,6 +650,412 @@ class Scintillation:
         ax.set_ylabel(r"Delay $f_{\nu}$ [$s$]")
         
         print("Successfully plotted phase of secondary cross spectrum.")
+        
+    def plot_Fourier_phase(self,dict_plot,figure,ax,tag):
+        #load and check data
+        # - secondary spectrum
+        path_computation = os.path.join(self.path_computations,"secondary_spectrum")
+        if not os.path.exists(path_computation):
+            warnings.warn("You need to run 'compute secondary_spectrum' first!")
+            return 0
+        file_phase = os.path.join(path_computation,"Fourier_phase.npy")
+        file_doppler = os.path.join(path_computation,"doppler.npy")
+        file_delay = os.path.join(path_computation,"delay.npy")
+        phase = np.load(file_phase)
+        f_t = np.load(file_doppler)
+        f_nu = np.load(file_delay)
+        
+        #load specifications
+        key_sepcs = "plot_secondary_phase{0}".format(tag)
+        if not key_sepcs in dict_plot:
+            dict_subplot = {"cmap":'bwr',"vmin":-math.pi,"vmax":math.pi,"f_t_min":float(-1./2./self.delta_t),"f_t_max":float(1./2./self.delta_t),"f_nu_min":0.,"f_nu_max":float(1./2./self.delta_nu),
+                            "telescope1":0,"telescope2":0,"title":"phase of secondary spectrum [rad]","f_t_sampling":1,"f_nu_sampling":1}
+            dict_plot.update({key_sepcs:dict_subplot})
+        else:
+            dict_subplot = dict_plot[key_sepcs]
+            
+        #Preprocess data
+        # - sparate 2pi from the Fourier frequency
+        f_t /= 2.*math.pi
+        f_nu /= 2.*math.pi
+        # - read in specifications
+        tel1 = dict_subplot["telescope1"]
+        tel2 = dict_subplot["telescope2"]
+        min_index_t = 0
+        max_index_t = len(f_t)-1
+        for index_t in range(len(f_t)):
+            if f_t[index_t]<dict_subplot["f_t_min"]:
+                min_index_t = index_t
+            elif f_t[index_t]>dict_subplot["f_t_max"]:
+                max_index_t = index_t
+                break
+        f_t = f_t[min_index_t:max_index_t+1]
+        min_index_nu = 0
+        max_index_nu = len(f_nu)-1
+        for index_nu in range(len(f_nu)):
+            if f_nu[index_nu]<dict_subplot["f_nu_min"]:
+                min_index_nu = index_nu
+            elif f_nu[index_nu]>dict_subplot["f_nu_max"]:
+                max_index_nu = index_nu
+                break
+        f_nu = f_nu[min_index_nu:max_index_nu+1]
+        Phase = phase[tel1,tel2,min_index_t:max_index_t+1,min_index_nu:max_index_nu+1]
+        # - downsampling
+        f_t_sampling = dict_subplot["f_t_sampling"]
+        f_nu_sampling = dict_subplot["f_nu_sampling"]
+        def func_add(block,axis=(0,1)):
+            result = np.sum(block+math.pi,axis)%(2.*math.pi)-math.pi
+            return result
+        Phase = block_reduce(Phase, block_size=(f_t_sampling,f_nu_sampling), func=func_add)
+        coordinates = np.array([f_t,f_t])
+        coordinates = block_reduce(coordinates, block_size=(1,f_t_sampling), func=np.mean, cval=f_t[-1])
+        f_t = coordinates[0,:]
+        coordinates = np.array([f_nu,f_nu])
+        coordinates = block_reduce(coordinates, block_size=(1,f_nu_sampling), func=np.mean, cval=f_nu[-1])
+        f_nu = coordinates[0,:]
+        # - compute offsets to center pccolormesh
+        offset_f_t = (f_t[1]-f_t[0])/2.
+        offset_f_nu = (f_nu[1]-f_nu[0])/2.
+        
+        #draw the plot
+        ax.set_xlim([dict_subplot["f_t_min"],dict_subplot["f_t_max"]])
+        ax.set_ylim([dict_subplot["f_nu_min"],dict_subplot["f_nu_max"]])
+        im = ax.pcolormesh(f_t-offset_f_t,f_nu-offset_f_nu,map(list, zip(*Phase)),cmap=dict_subplot["cmap"],vmin=dict_subplot["vmin"],vmax=dict_subplot["vmax"])
+        figure.colorbar(im, ax=ax)
+        ax.set_title(dict_subplot["title"])
+        ax.set_xlabel(r"Doppler $f_t$ [$1/s$]")
+        ax.set_ylabel(r"Delay $f_{\nu}$ [$s$]")
+        
+        print("Successfully plotted phase of secondary spectrum.")
+        
+#-----SECONDARY SPECTRUM PHASE ANALYSIS-----
+        
+    def compute_FFT_delta_phi(self,path_computation):
+        #load and check data
+        DynSpec = np.load(os.path.join(self.path_data,"DynSpec.npy"))
+        
+        #define files to compute
+        file_delph = os.path.join(path_computation,"delph.npy")
+        file_cdelph = os.path.join(path_computation,"cdelph.npy")
+        file_doppler = os.path.join(path_computation,"doppler.npy")
+        file_delay = os.path.join(path_computation,"delay.npy")
+    
+        #import c code for discrete Fourier transform
+        filename = os.path.join(os.path.join("scinter","c_source"), 'nut_transform.so')
+        lib = ctypes.CDLL(filename)
+        # lib.omp_set_num_threads (4)   # if you do not want to use all cores
+        lib.comp_dft_for_secspec.argtypes = [
+            ctypes.c_int,   # ntime
+            ctypes.c_int,   # nfreq
+            ctypes.c_int,   # nr    Doppler axis
+            ctypes.c_double,  # r0
+            ctypes.c_double,  # delta r
+            ndpointer(dtype=np.float64,
+                      flags='CONTIGUOUS', ndim=1),  # freqs [nfreq]
+            ndpointer(dtype=np.float64,
+                      flags='CONTIGUOUS', ndim=1),  # src [ntime]
+            ndpointer(dtype=np.float64,
+                      flags='CONTIGUOUS', ndim=2),  # input pow [ntime,nfreq]
+            ndpointer(dtype=np.complex128,
+                      flags='CONTIGUOUS', ndim=2),  # result [nr,nfreq]
+        ]
+        
+        #create containers
+        t0 = self.t[0]
+        nu1 = self.nu[0]
+        N_nucut = self.N_nu/2
+        nu2 = self.nu[N_nucut]
+        nuref = self.nu_half
+        DynSpec1 = DynSpec[:,:,:,0:N_nucut]
+        DynSpec2 = DynSpec[:,:,:,N_nucut:N_nucut*2]
+        assert (DynSpec1.shape==DynSpec2.shape)
+        SecSpec1 = np.zeros(DynSpec1.shape,dtype=np.complex)
+        SecSpec2 = np.zeros(DynSpec2.shape,dtype=np.complex)
+        f_t = np.linspace(-math.pi/self.delta_t,math.pi/self.delta_t,num=self.N_t,endpoint=False)
+        f_nu = np.linspace(-math.pi/self.delta_nu,math.pi/self.delta_nu,num=N_nucut,endpoint=False)
+        delph = np.zeros(SecSpec1.shape,dtype=float)
+        cdelph = np.zeros(SecSpec1.shape,dtype=float)
+    
+        #preparations
+        ntime = self.N_t
+        nfreq = N_nucut
+        r0 = np.fft.fftfreq(ntime)
+        delta_r = r0[1] - r0[0]
+        src = np.linspace(0, 1, ntime).astype('float64')
+        src = np.arange(ntime).astype('float64')
+    
+        # Common reference freq.
+        fscale1 = (self.nu[0:N_nucut] / nuref).astype('float64')
+        fscale2 = (self.nu[N_nucut:N_nucut*2] / nuref).astype('float64')
+    
+        #perform the computation
+        time_start = time.time()
+        print("Computing phase shift of nut transformed secondary spectrum ...")
+        bar = progressbar.ProgressBar(maxval=self.N_p**2, widgets=[progressbar.Bar('=', '[', ']'), ' ', progressbar.Percentage()])
+        bar.start()
+        for i_p1 in range(self.N_p):
+            for i_p2 in range(self.N_p):
+                bar.update(i_p1*self.N_p+i_p2)
+                # - 1: lower frequencies
+                # - declare the empty result array:
+                SS = np.empty((ntime, nfreq), dtype=np.complex128)
+                # - call the DFT:
+                lib.comp_dft_for_secspec(ntime, nfreq, ntime, min(r0), delta_r, fscale1, src, DynSpec1[i_p1,i_p2,:,:].astype('float64'), SS)
+                # - flip along time
+                SS = SS[::-1]
+                # - correct zero point
+                SS = np.roll(SS,1,axis=0)
+                # - Still need to FFT y axis, should change to pyfftw for memory and
+                #   speed improvement
+                SS = np.fft.fft(SS, axis=1)
+                SS = np.fft.fftshift(SS, axes=1)
+                SecSpec1[i_p1,i_p2] = SS
+                
+                # - 2: higher frequencies
+                # - declare the empty result array:
+                SS = np.empty((ntime, nfreq), dtype=np.complex128)
+                # - call the DFT:
+                lib.comp_dft_for_secspec(ntime, nfreq, ntime, min(r0), delta_r, fscale2, src, DynSpec2[i_p1,i_p2,:,:].astype('float64'), SS)
+                # - flip along time
+                SS = SS[::-1]
+                # - correct zero point
+                SS = np.roll(SS,1,axis=0)
+                # - Still need to FFT y axis, should change to pyfftw for memory and
+                #   speed improvement
+                SS = np.fft.fft(SS, axis=1)
+                SS = np.fft.fftshift(SS, axes=1)
+                SecSpec2[i_p1,i_p2] = SS
+        bar.finish()
+        # - compute the phases
+        diff = SecSpec1*np.conj(SecSpec2)
+        delph = np.angle(diff)
+        cdelph = np.angle(diff*np.exp(-1.0j*(f_nu[na,na,na,:]+f_t[na,na,:,na]*t0/nuref)*(nu1-nu2)))
+        
+        #save the results
+        np.save(file_delph,delph)
+        np.save(file_cdelph,cdelph)
+        np.save(file_doppler,f_t)
+        np.save(file_delay,f_nu)
+        
+        time_current = time.time()-time_start
+        print("{0}s: Successfully computed the FFT phase difference.".format(time_current))
+        
+    def plot_FFT_phase_shift(self,dict_plot,figure,ax,tag):
+        #load and check data
+        # - FFT_delta_phi
+        path_computation = os.path.join(self.path_computations,"FFT_delta_phi")
+        if not os.path.exists(path_computation):
+            warnings.warn("You need to run 'compute FFT_delta_phi' first!")
+            return 0
+        file_delph = os.path.join(path_computation,"delph.npy")
+        file_cdelph = os.path.join(path_computation,"cdelph.npy")
+        file_doppler = os.path.join(path_computation,"doppler.npy")
+        file_delay = os.path.join(path_computation,"delay.npy")
+        delph = np.load(file_delph)
+        cdelph = np.load(file_cdelph)
+        f_t = np.load(file_doppler)
+        f_nu = np.load(file_delay)
+        print("delph: [{0},{1}], cdelph: [{2},{3}]".format(np.min(delph),np.max(delph),np.min(cdelph),np.max(cdelph)))
+        
+        #load specifications
+        key_sepcs = "plot_secondary_phase{0}".format(tag)
+        if not key_sepcs in dict_plot:
+            dict_subplot = {"cmap":'bwr',"vmin":-math.pi,"vmax":math.pi,"f_t_min":float(-1./2./self.delta_t),"f_t_max":float(1./2./self.delta_t),"f_nu_min":0.,"f_nu_max":float(1./2./self.delta_nu),
+                            "telescope1":0,"telescope2":0,"title":"$\Delta\phi$ [rad]","f_t_sampling":1,"f_nu_sampling":1, "correction":False}
+            dict_plot.update({key_sepcs:dict_subplot})
+        else:
+            dict_subplot = dict_plot[key_sepcs]
+            
+        #Preprocess data
+        # - sparate 2pi from the Fourier frequency
+        f_t /= 2.*math.pi
+        f_nu /= 2.*math.pi
+        # - read in specifications
+        tel1 = dict_subplot["telescope1"]
+        tel2 = dict_subplot["telescope2"]
+        min_index_t = 0
+        max_index_t = len(f_t)-1
+#        for index_t in range(len(f_t)):
+#            if f_t[index_t]<dict_subplot["f_t_min"]:
+#                min_index_t = index_t
+#            elif f_t[index_t]>dict_subplot["f_t_max"]:
+#                max_index_t = index_t
+#                break
+        f_t = f_t[min_index_t:max_index_t+1]
+        min_index_nu = 0
+        max_index_nu = len(f_nu)-1
+#        for index_nu in range(len(f_nu)):
+#            if f_nu[index_nu]<dict_subplot["f_nu_min"]:
+#                min_index_nu = index_nu
+#            elif f_nu[index_nu]>dict_subplot["f_nu_max"]:
+#                max_index_nu = index_nu
+#                break
+        f_nu = f_nu[min_index_nu:max_index_nu+1]
+        if dict_subplot["correction"]:
+            Phase = cdelph[tel1,tel2,min_index_t:max_index_t+1,min_index_nu:max_index_nu+1]
+        else:
+            Phase = delph[tel1,tel2,min_index_t:max_index_t+1,min_index_nu:max_index_nu+1]
+        # - downsampling
+        f_t_sampling = dict_subplot["f_t_sampling"]
+        f_nu_sampling = dict_subplot["f_nu_sampling"]
+        def func_add(block,axis=(0,1)):
+            result = np.sum(block+math.pi,axis)%(2.*math.pi)-math.pi
+            return result
+        Phase = block_reduce(Phase, block_size=(f_t_sampling,f_nu_sampling), func=func_add)
+        coordinates = np.array([f_t,f_t])
+        coordinates = block_reduce(coordinates, block_size=(1,f_t_sampling), func=np.mean, cval=f_t[-1])
+        f_t = coordinates[0,:]
+        coordinates = np.array([f_nu,f_nu])
+        coordinates = block_reduce(coordinates, block_size=(1,f_nu_sampling), func=np.mean, cval=f_nu[-1])
+        f_nu = coordinates[0,:]
+        # - compute offsets to center pccolormesh
+        offset_f_t = (f_t[1]-f_t[0])/2.
+        offset_f_nu = (f_nu[1]-f_nu[0])/2.
+        
+        #draw the plot
+        ax.set_xlim([dict_subplot["f_t_min"],dict_subplot["f_t_max"]])
+        ax.set_ylim([dict_subplot["f_nu_min"],dict_subplot["f_nu_max"]])
+        im = ax.pcolormesh((f_t-offset_f_t)/1.0e-03,(f_nu-offset_f_nu)/1.0e-06,map(list, zip(*Phase)),cmap=dict_subplot["cmap"],vmin=dict_subplot["vmin"],vmax=dict_subplot["vmax"])
+        figure.colorbar(im, ax=ax)
+        ax.set_title(dict_subplot["title"])
+        ax.set_xlabel(r"$f_D$ [mHz]")
+        ax.set_ylabel(r"$\tau$ [$\mu$s]")
+        
+        print("Successfully plotted phase shift of secondary spectrum.")
+        
+    def plot_FFT_phi_evolution(self,dict_plot,figure,ax,tag):
+        #load and check data
+        # - FFT_phi_evolution
+        path_computation = os.path.join(self.path_computations,"FFT_phi_evolution")
+        if not os.path.exists(path_computation):
+            warnings.warn("You need to run 'compute FFT_phi_evolution' first!")
+            return 0
+        file_phase = os.path.join(path_computation,"phase.npy")
+        file_cphase = os.path.join(path_computation,"cphase.npy")
+        file_midnus = os.path.join(path_computation,"midnus.npy")
+        file_doppler = os.path.join(path_computation,"doppler.npy")
+        file_delay = os.path.join(path_computation,"delay.npy")
+        phase = np.load(file_phase)
+        cphase = np.load(file_cphase)
+        midnus = np.load(file_midnus)*1.0e-06 #MHz
+        f_t = np.load(file_doppler)/(2.*math.pi*1.0e-03) #mHz
+        f_nu = np.load(file_delay)/(2.*math.pi*1.0e-06) #us
+        print("phase: [{0},{1}], cphase: [{2},{3}]".format(np.min(phase),np.max(phase),np.min(cphase),np.max(cphase)))
+        
+        #load specifications
+        key_sepcs = "plot_secondary_phase{0}".format(tag)
+        if not key_sepcs in dict_plot:
+            dict_subplot = {"f_D":0.,"tau":0.,"title":"$\phi$ [rad]","phi_max":math.pi,"phi_min":-math.pi,
+                            "nu_min":float(midnus[0]),"nu_max":float(midnus[-1])}
+            dict_plot.update({key_sepcs:dict_subplot})
+        else:
+            dict_subplot = dict_plot[key_sepcs]
+            
+        #draw pixel
+        i_t = (np.abs(f_t-dict_subplot["f_D"])).argmin()
+        i_nu = (np.abs(f_nu-dict_subplot["tau"])).argmin()
+        
+        #draw the plot
+        ax.set_xlim([dict_subplot["nu_min"],dict_subplot["nu_max"]])
+        ax.set_ylim([dict_subplot["phi_min"],dict_subplot["phi_max"]])
+        ax.plot(midnus,phase[:,i_t,i_nu],label="raw",linestyle='dotted',marker="o",markersize=8)
+        ax.plot(midnus,cphase[:,i_t,i_nu],label="corrected",linestyle='dotted',marker="o",markersize=8)
+        ax.legend(loc='best')
+        ax.set_title(dict_subplot["title"])
+        ax.set_xlabel(r"$\nu$ [MHz]")
+        ax.set_ylabel("$\phi$ [rad] at $f_D$={0}, $\\tau$={1}".format(dict_subplot["f_D"],dict_subplot["tau"]))
+        
+        print("Successfully plotted phase shift of secondary spectrum.")
+        
+    def plot_FFT_phi_substep(self,dict_plot,figure,ax,tag):
+        #load and check data
+        # - FFT_phi_evolution
+        path_computation = os.path.join(self.path_computations,"FFT_phi_evolution")
+        if not os.path.exists(path_computation):
+            warnings.warn("You need to run 'compute FFT_phi_evolution' first!")
+            return 0
+        file_phase = os.path.join(path_computation,"phase.npy")
+        file_cphase = os.path.join(path_computation,"cphase.npy")
+        file_midnus = os.path.join(path_computation,"midnus.npy")
+        file_doppler = os.path.join(path_computation,"doppler.npy")
+        file_delay = os.path.join(path_computation,"delay.npy")
+        phase = np.load(file_phase)
+        cphase = np.load(file_cphase)
+        midnus = np.load(file_midnus)*1.0e-06 #MHz
+        f_t = np.load(file_doppler)/(2.*math.pi*1.0e-03) #mHz
+        f_nu = np.load(file_delay)/(2.*math.pi*1.0e-06) #us
+        print("phase: [{0},{1}], cphase: [{2},{3}]".format(np.min(phase),np.max(phase),np.min(cphase),np.max(cphase)))
+        
+        #load specifications
+        key_sepcs = "plot_FFT_phi_substep{0}".format(tag)
+        if not key_sepcs in dict_plot:
+            dict_subplot = {"cmap":'hsv',"vmin":-math.pi,"vmax":math.pi,"f_t_min":float(f_t[0]),"f_t_max":float(f_t[-1]),"f_nu_min":float(f_nu[0]),"f_nu_max":float(f_nu[-1]),
+                            "index_nu":0, "correction":False}
+            dict_plot.update({key_sepcs:dict_subplot})
+        else:
+            dict_subplot = dict_plot[key_sepcs]
+        i_nu = dict_subplot["index_nu"]
+            
+        #Preprocess data
+        if dict_subplot["correction"]:
+            Phase = cphase[i_nu,:,:]
+        else:
+            Phase = phase[i_nu,:,:]
+        # - compute offsets to center pccolormesh
+        offset_f_t = (f_t[1]-f_t[0])/2.
+        offset_f_nu = (f_nu[1]-f_nu[0])/2.
+        
+        #draw the plot
+        ax.set_xlim([dict_subplot["f_t_min"],dict_subplot["f_t_max"]])
+        ax.set_ylim([dict_subplot["f_nu_min"],dict_subplot["f_nu_max"]])
+        im = ax.pcolormesh((f_t-offset_f_t),(f_nu-offset_f_nu),map(list, zip(*Phase)),cmap=dict_subplot["cmap"],vmin=dict_subplot["vmin"],vmax=dict_subplot["vmax"])
+        figure.colorbar(im, ax=ax)
+        ax.set_title("$\phi$ [rad] at $\\nu_c$={0} MHz".format(midnus[i_nu]))
+        ax.set_xlabel(r"$f_D$ [mHz]")
+        ax.set_ylabel(r"$\tau$ [$\mu$s]")
+        
+        print("Successfully plotted phase of secondary spectrum.")
+        
+    def plot_phase_gradient_SSpec(self,dict_plot,figure,ax,tag):
+        #load and check data
+        # - extracted_SSpec
+        path_computation = os.path.join(self.path_computations,"extracted_SSpec")
+        if not os.path.exists(path_computation):
+            warnings.warn("You need to run 'compute extracted_SSpec' first!")
+            return 0
+        file_ESSpec = os.path.join(path_computation,"ESSpec.npy")
+        file_doppler = os.path.join(path_computation,"doppler.npy")
+        file_delay = os.path.join(path_computation,"delay.npy")
+        ESSpec = np.load(file_ESSpec)
+        Slope = ESSpec[1,:,:]*1.0e+6 #/MHz
+        f_t = np.load(file_doppler)/(2.*math.pi*1.0e-03) #mHz
+        f_nu = np.load(file_delay)/(2.*math.pi*1.0e-06) #us
+        #print("phase: [{0},{1}], cphase: [{2},{3}]".format(np.min(ESSpec),np.max(ESSpec),np.min(cphase),np.max(cphase)))
+        
+        #load specifications
+        key_sepcs = "plot_phase_gradient_SSpec{0}".format(tag)
+        if not key_sepcs in dict_plot:
+            dict_subplot = {"cmap":'viridis',"vmin":float(np.min(Slope)),"vmax":float(np.max(Slope)),"f_t_min":float(f_t[0]),"f_t_max":float(f_t[-1]),"f_nu_min":float(f_nu[0]),"f_nu_max":float(f_nu[-1])}
+            dict_plot.update({key_sepcs:dict_subplot})
+        else:
+            dict_subplot = dict_plot[key_sepcs]
+            
+        #Preprocess data
+        
+        # - compute offsets to center pccolormesh
+        offset_f_t = (f_t[1]-f_t[0])/2.
+        offset_f_nu = (f_nu[1]-f_nu[0])/2.
+        
+        #draw the plot
+        ax.set_xlim([dict_subplot["f_t_min"],dict_subplot["f_t_max"]])
+        ax.set_ylim([dict_subplot["f_nu_min"],dict_subplot["f_nu_max"]])
+        im = ax.pcolormesh((f_t-offset_f_t),(f_nu-offset_f_nu),map(list, zip(*Slope)),cmap=dict_subplot["cmap"],vmin=dict_subplot["vmin"],vmax=dict_subplot["vmax"])
+        figure.colorbar(im, ax=ax)
+        ax.set_title(r"$\partial\phi / \partial\nu$ [rad/MHz]")
+        ax.set_xlabel(r"$f_D$ [mHz]")
+        ax.set_ylabel(r"$\tau$ [$\mu$s]")
+        
+        print("Successfully plotted phase gradient of secondary spectrum.")
         
 #-----COMBINED SPECTRUM-----
     
@@ -1911,7 +2209,7 @@ class Scintillation:
         #load specifications
         file_specs = os.path.join(path_computation,"specs_thth_diagram.yaml")
         if not os.path.exists(file_specs):
-            dict_specs = {"N_th":100,"th_min":-25.,"th_max":25.,"D_eff":1000.,"v_eff":100.,"v_angle":0.,"source":"ss_0_0"}
+            dict_specs = {"N_th":100,"th_min":-25.,"th_max":25.,"D_eff":1000.,"v_eff":300.,"v_angle":0.,"source":"ss_0_0", "eta":0.5797, "from_curvature":True}
             with open(file_specs,'w') as writefile:
                 self.yaml.dump(dict_specs,writefile)
         else:
@@ -1920,10 +2218,14 @@ class Scintillation:
         N_th = dict_specs["N_th"]
         th_min = dict_specs["th_min"]*self.mas
         th_max = dict_specs["th_max"]*self.mas
-        D_eff = dict_specs["D_eff"]*self.pc
         v_eff = dict_specs["v_eff"]*1000.
         v_angle = dict_specs["v_angle"]*math.pi/180.
         vv_eff = [v_eff*np.cos(v_angle),v_eff*np.sin(v_angle)]
+        if dict_specs["from_curvature"]:
+            D_eff = dict_specs["eta"]/self.LightSpeed*2.*self.nu_half**2*vv_eff[0]**2
+            print(D_eff/self.pc)
+        else:
+            D_eff = dict_specs["D_eff"]*self.pc
         source = dict_specs["source"]
         
         #load and check data
@@ -1965,16 +2267,26 @@ class Scintillation:
         #perform the computation
         time_start = time.time()
         print("Computing theta theta diagram ...")
+        # - clean secondary spectrum
+        for i_nu in xrange(self.N_nu):
+            SecSpec[:,i_nu] -= np.median(SecSpec[:,i_nu])
+        SecSpec[SecSpec<0.] = 0.
+        # - interpolate
         ip_SecSpec = interpolate.interp2d(f_nu,f_t,SecSpec,kind='linear',fill_value=0.)
+        # - compute flux conserving norm
+        norm = 2.*math.pi/self.LightSpeed*D_eff
+        # - compute conversion factors
+        t_factor = 2.*math.pi*self.nu_half/self.LightSpeed*vv_eff[0]
+        nu_factor = -math.pi/self.LightSpeed*D_eff
         # - perform the combination
         bar = progressbar.ProgressBar(maxval=N_th, widgets=[progressbar.Bar('=', '[', ']'), ' ', progressbar.Percentage()])
         bar.start()
         for i_th1,v_th1 in enumerate(theta):
             bar.update(i_th1)
             for i_th2,v_th2 in enumerate(theta):
-                f_t = 2.*math.pi*self.nu_half/self.LightSpeed*vv_eff[0]*(v_th1-v_th2)
-                f_nu = -math.pi/self.LightSpeed*D_eff*(v_th1+v_th2)*(v_th1-v_th2)
-                thth[i_th1,i_th2] = ip_SecSpec(f_nu,f_t)
+                f_t = t_factor*(v_th1-v_th2)
+                f_nu = nu_factor*(v_th1+v_th2)*(v_th1-v_th2)
+                thth[i_th1,i_th2] = ip_SecSpec(f_nu,f_t)*np.abs(norm*f_t)
         bar.finish()
         
         #save the results
@@ -2062,9 +2374,14 @@ class Scintillation:
         #perform the computation
         time_start = time.time()
         print("Computing brightness distribution ...")
-        # - take the double median of the differences between columns and lines to get a first guess
-        for i_th in range(N_th):
-            mu[i_th] = np.median(np.median(thth[:,i_th,na]-thth[:,:],axis=0))
+#        # - take the double median of the differences between columns and lines to get a first guess
+#        for i_th in range(N_th):
+#            mu[i_th] = np.median(np.median(thth[:,i_th,na]-thth[:,:],axis=0))
+        # - or start from eigenvector decomposition
+        eigenvalues, eigenvectors = np.linalg.eig(thth)
+        amplitude = np.sqrt(np.max(np.abs(eigenvalues)))
+        i_amp = np.where(eigenvalues==np.max(np.abs(eigenvalues)))[0][0]
+        mu = amplitude*np.abs(eigenvectors[:,i_amp])
         # - perform the maschine learning
         bar = progressbar.ProgressBar(maxval=epochs, widgets=[progressbar.Bar('=', '[', ']'), ' ', progressbar.Percentage()])
         bar.start()
@@ -2093,6 +2410,52 @@ class Scintillation:
         time_current = time.time()-time_start
         print("{0}s: Successfully computed the brightness distribution by taking the root of the theta-theta diagram.".format(time_current))
         
+    def compute_thth_eig_decomp(self,path_computation):
+        #load and check data
+        # - theta theta diagram
+        path_results = os.path.join(self.path_computations,"thth_diagram")
+        if not os.path.exists(path_results):
+            warnings.warn("You need to run 'compute thth_diagram' first!")
+            return 0
+        file_thth = os.path.join(path_results,"thth.npy")
+        file_theta = os.path.join(path_results,"theta.npy")
+        thth = np.load(file_thth)
+        theta = np.load(file_theta)
+        N_th = len(theta)
+        
+        #define files to compute
+        file_brightness = os.path.join(path_computation,"brightness.npy")
+        file_thth_clean = os.path.join(path_computation,"thth_clean.npy")
+        
+        #create containers
+        mu = np.zeros(N_th,dtype=float)
+        thth_clean = np.empty((N_th,N_th),dtype=float)
+        
+        #perform the computation
+        time_start = time.time()
+        print("Performing eigenvector decomposition ...")
+#        # - flag noisy parts to zero
+#        uldr = 1.
+#        dlur = 3.
+#        for i1 in range(N_th):
+#            for i2 in range(N_th):
+#                if (abs(theta[i1]+theta[i2])>uldr) & (abs(theta[i1]-theta[i2])>dlur):
+#                    thth[i1,i2] = 0.
+        # - perform the decomposition
+        eigenvalues, eigenvectors = np.linalg.eig(thth)
+        amplitude = np.sqrt(np.max(np.abs(eigenvalues)))
+        i_amp = np.where(eigenvalues==np.max(np.abs(eigenvalues)))[0][0]
+        mu = amplitude*np.abs(eigenvectors[:,i_amp])
+        thth_clean = mu[:,na]*mu[na,:]
+        
+        #save the results
+        np.save(file_brightness,mu)
+        np.save(file_thth_clean,thth_clean)
+        
+        time_current = time.time()-time_start
+        print("{0}s: Successfully computed the brightness distribution by performing the eigenvectordecomposition of the theta-theta diagram.".format(time_current))
+        
+        
     def plot_thth_brightness(self,dict_plot,figure,ax,tag):
         #load and check data
         # - theta theta diagram
@@ -2105,24 +2468,25 @@ class Scintillation:
         thth = np.load(file_thth)
         theta = np.load(file_theta)
         N_th = len(theta)
-        # - theta theta root
-        path_results = os.path.join(self.path_computations,"thth_root")
-        if not os.path.exists(path_results):
-            warnings.warn("You need to run 'compute thth_root' first!")
-            return 0
-        file_mu = os.path.join(path_results,"brightness.npy")
-        #file_thth_clean = os.path.join(path_results,"thth_clean.npy")
-        mu = np.load(file_mu)
-        #thth_clean = np.load(file_thth_clean)
         
         #load specifications
         key_sepcs = "plot_thth_brightness{0}".format(tag)
         if not key_sepcs in dict_plot:
             dict_subplot = {"th_min":-25.,"th_max":25.,"mu_min":0.,"mu_max":1.,"color":"black",
-                            "title":"brightness distribution (log10)","cmap":'viridis',"vmin":0.,"vmax":20.,"alpha":0.3}
+                            "title":"brightness distribution (log10)","cmap":'viridis',"vmin":0.,"vmax":20.,"alpha":0.3, "source":"thth_eig_decomp"}
             dict_plot.update({key_sepcs:dict_subplot})
         else:
             dict_subplot = dict_plot[key_sepcs]
+            
+        # - brightness
+        path_results = os.path.join(self.path_computations,dict_subplot["source"])
+        if not os.path.exists(path_results):
+            warnings.warn("You need to run 'compute {0}' first!".format(dict_subplot["source"]))
+            return 0
+        file_mu = os.path.join(path_results,"brightness.npy")
+        #file_thth_clean = os.path.join(path_results,"thth_clean.npy")
+        mu = np.load(file_mu)
+        #thth_clean = np.load(file_thth_clean)
             
         #Preprocess data
         # - compute common y-axis
@@ -2147,6 +2511,7 @@ class Scintillation:
         # - apply logarithmic scale
         SecSpec_log10 = np.log10(thth)
         mu_log10 = np.log10(mu)
+        #print(np.nanmin(mu_log10),np.nanmax(mu_log10))
         
         
         #draw the plot
@@ -2157,7 +2522,7 @@ class Scintillation:
         ax.plot(theta/self.mas,mu_log10,label="brightness",color=dict_subplot["color"])
         ax.set_title(dict_subplot["title"])
         ax.set_xlabel(r"$\theta$ [mas]")
-        ax.set_ylabel(r"$\mu$")
+        ax.set_ylabel(r"$\mu$ (log10)")
         plt.grid(True)
         
         print("Successfully plotted brightness distribution from theta-theta diagram.")
@@ -2174,24 +2539,25 @@ class Scintillation:
         #thth = np.load(file_thth)
         theta = np.load(file_theta)
         #N_th = len(theta)
-        # - theta theta root
-        path_results = os.path.join(self.path_computations,"thth_root")
-        if not os.path.exists(path_results):
-            warnings.warn("You need to run 'compute thth_root' first!")
-            return 0
-        #file_mu = os.path.join(path_results,"brightness.npy")
-        file_thth_clean = os.path.join(path_results,"thth_clean.npy")
-        #mu = np.load(file_mu)
-        thth_clean = np.load(file_thth_clean)
         
         #load specifications
         key_sepcs = "plot_thth_diagram_clean{0}".format(tag)
         if not key_sepcs in dict_plot:
             dict_subplot = {"cmap":'viridis',"vmin":0.,"vmax":20.,"th_min":None,"th_max":None,
-                            "title":"cleaned secondary spectrum (log10)"}
+                            "title":"cleaned secondary spectrum (log10)", "source":"thth_eig_decomp"}
             dict_plot.update({key_sepcs:dict_subplot})
         else:
             dict_subplot = dict_plot[key_sepcs]
+            
+        # - theta theta root
+        path_results = os.path.join(self.path_computations,dict_subplot["source"])
+        if not os.path.exists(path_results):
+            warnings.warn("You need to run 'compute {0}' first!".format(dict_subplot["source"]))
+            return 0
+        #file_mu = os.path.join(path_results,"brightness.npy")
+        file_thth_clean = os.path.join(path_results,"thth_clean.npy")
+        #mu = np.load(file_mu)
+        thth_clean = np.load(file_thth_clean)
         
         #Preprocess data
         # - compute offsets to center pccolormesh
@@ -2213,20 +2579,21 @@ class Scintillation:
         
         print("Successfully plotted cleaned theta-theta diagram.")
         
-#-----LINEARIZED SECONDARY SPECTRUM
-        
-    def compute_linear_secondary_spectrum(self,path_computation):
+    def compute_SecSpec_from_thth(self,path_computation):
         #load specifications
-        file_specs = os.path.join(path_computation,"specs_LinSecSpec.yaml")
+        file_specs = os.path.join(path_computation,"specs_thth_diagram.yaml")
         if not os.path.exists(file_specs):
-            dict_specs = {"source":"ss_0_0","psip_max":5.0e+15}
+            dict_specs = {"D_eff":1000.,"v_eff":100.,"v_angle":0.,"source":"thth_eig_decomp"}
             with open(file_specs,'w') as writefile:
                 self.yaml.dump(dict_specs,writefile)
         else:
             with open(file_specs,'r') as readfile:
                 dict_specs =self.yaml.load(readfile)
+        D_eff = dict_specs["D_eff"]*self.pc
+        v_eff = dict_specs["v_eff"]*1000.
+        v_angle = dict_specs["v_angle"]*math.pi/180.
+        vv_eff = [v_eff*np.cos(v_angle),v_eff*np.sin(v_angle)]
         source = dict_specs["source"]
-        psip_max = dict_specs["psip_max"]
         
         #load and check data
         # - secondary spectrum
@@ -2241,53 +2608,271 @@ class Scintillation:
         f_t = np.load(file_doppler)
         f_nu = np.load(file_delay)
         # - check the data source
-        source = source.split("_")
-        if source[0]=="ss":
-            i_p1 = int(source[1])
-            i_p2 = int(source[2])
-            SecSpec = SecSpec[i_p1,i_p2]
-        elif source[0]=="cc":
-            # - combined contrast increased secondary spectrum
-            path_results = os.path.join(self.path_computations,"c_contrast")
+        # - theta theta diagram
+        path_results = os.path.join(self.path_computations,"thth_diagram")
+        if not os.path.exists(path_results):
+            warnings.warn("You need to run 'compute thth_diagram' first!")
+            return 0
+        file_thth = os.path.join(path_results,"thth.npy")
+        file_theta = os.path.join(path_results,"theta.npy")
+        theta = np.load(file_theta)
+        #N_th = len(theta)
+        if source == "thth_diagram":
+            thth = np.load(file_thth)
+        elif source == "thth_eig_decomp":
+            # - theta theta root
+            path_results = os.path.join(self.path_computations,"thth_eig_decomp")
             if not os.path.exists(path_results):
-                warnings.warn("You need to run 'compute c_contrast' first!")
+                warnings.warn("You need to run 'compute {0}' first!".format("thth_eig_decomp"))
                 return 0
-            file_ccpower = os.path.join(path_results,"ccpower.npy")
-            ccpower = np.load(file_ccpower)
-            SecSpec = ccpower
+            #file_mu = os.path.join(path_results,"brightness.npy")
+            file_thth_clean = os.path.join(path_results,"thth_clean.npy")
+            #mu = np.load(file_mu)
+            thth = np.load(file_thth_clean)
+        elif source == "thth_root":
+            # - theta theta root
+            path_results = os.path.join(self.path_computations,"thth_root")
+            if not os.path.exists(path_results):
+                warnings.warn("You need to run 'compute {0}' first!".format("thth_root"))
+                return 0
+            #file_mu = os.path.join(path_results,"brightness.npy")
+            file_thth_clean = os.path.join(path_results,"thth_clean.npy")
+            #mu = np.load(file_mu)
+            thth = np.load(file_thth_clean)
         
         #define files to compute
-        file_LinSecSpec = os.path.join(path_computation,"LinSecSpec.npy")
-        file_psip = os.path.join(path_computation,"psip.npy")
-        file_psin = os.path.join(path_computation,"psin.npy")
+        file_SSthth = os.path.join(path_computation,"secondary_spectrum.npy")
+        file_doppler = os.path.join(path_computation,"doppler.npy")
+        file_delay = os.path.join(path_computation,"delay.npy")
         
         #create containers
-        LinSecSpec = np.zeros((self.N_t,self.N_nu),dtype=float)
-        #psip = np.linspace(-self.nu_half**2*f_nu[-1]/f_t[-1],self.nu_half**2*f_nu[-1]/f_t[-1],num=self.N_nu)
-        psip = np.linspace(-psip_max,psip_max,num=self.N_nu)
-        psin = f_t/self.nu_half
+        SSthth = np.zeros((self.N_t,self.N_nu),dtype=float)
         
         #perform the computation
         time_start = time.time()
-        print("Computing linearized secondary spectrum ...")
-        ip_SecSpec = interpolate.interp2d(f_nu,f_t,SecSpec,kind='linear',fill_value=0.)
+        print("Computing secondary spectrum from theta theta diagram ...")
+        # - interpolate
+        ip_thth = interpolate.interp2d(theta,theta,thth,kind='linear',fill_value=0.)
+        # - compute flux conserving norm
+        norm = 2.*math.pi/self.LightSpeed*D_eff
+        # - compute conversion factors
+        a_factor = -self.nu_half*vv_eff[0]/D_eff
+        b_factor = self.LightSpeed/(4.*math.pi*self.nu_half*vv_eff[0])
         # - perform the combination
         bar = progressbar.ProgressBar(maxval=self.N_t, widgets=[progressbar.Bar('=', '[', ']'), ' ', progressbar.Percentage()])
         bar.start()
-        for i_f_t,v_f_t in enumerate(f_t):
-            bar.update(i_f_t)
-            for i_psip,v_psip in enumerate(psip):
-                v_f_nu = v_psip*v_f_t/self.nu_half**2
-                LinSecSpec[i_f_t,i_psip] = ip_SecSpec(v_f_nu,v_f_t)
+        for i_t,v_t in enumerate(f_t):
+            bar.update(i_t)
+            for i_nu,v_nu in enumerate(f_nu):
+                if not v_t==0.:
+                    th1 = a_factor*v_nu/v_t + b_factor*v_t
+                    th2 = a_factor*v_nu/v_t - b_factor*v_t
+                    SSthth[i_t,i_nu] = ip_thth(th1,th2)/np.abs(norm*v_t)
+                else:
+                    SSthth[i_t,i_nu] = 0.
         bar.finish()
         
         #save the results
-        np.save(file_LinSecSpec,LinSecSpec)
-        np.save(file_psip,psip)
-        np.save(file_psin,psin)
+        np.save(file_SSthth,SSthth)
+        np.save(file_doppler,f_t)
+        np.save(file_delay,f_nu)
         
         time_current = time.time()-time_start
-        print("{0}s: Successfully computed the linearized secondary spectrum.".format(time_current))
+        print("{0}s: Successfully computed secondary spectrum from the theta-theta diagram.".format(time_current))
+        
+    def plot_SecSpec_from_thth(self,dict_plot,figure,ax,tag):
+        #load and check data
+        # - SecSpec_from_thth
+        path_computation = os.path.join(self.path_computations,"SecSpec_from_thth")
+        if not os.path.exists(path_computation):
+            warnings.warn("You need to run 'compute SecSpec_from_thth' first!")
+            return 0
+        file_power = os.path.join(path_computation,"secondary_spectrum.npy")
+        file_doppler = os.path.join(path_computation,"doppler.npy")
+        file_delay = os.path.join(path_computation,"delay.npy")
+        SecSpec = np.load(file_power)
+        f_t = np.load(file_doppler)
+        f_nu = np.load(file_delay)
+        
+        #load specifications
+        key_sepcs = "plot_secondary_spectrum{0}".format(tag)
+        if not key_sepcs in dict_plot:
+            dict_subplot = {"cmap":'viridis',"vmin":0.,"vmax":float(np.max(np.real(SecSpec))),"f_t_min":float(-1./2./self.delta_t),"f_t_max":float(1./2./self.delta_t),"f_nu_min":0.,"f_nu_max":float(1./2./self.delta_nu),
+                            "title":"secondary spectrum (log10)","f_t_sampling":1,"f_nu_sampling":1} # $P$ [$(W/m^2)^2$]
+            dict_plot.update({key_sepcs:dict_subplot})
+        else:
+            dict_subplot = dict_plot[key_sepcs]
+        
+        #Preprocess data
+        # - sparate 2pi from the Fourier frequency
+        f_t /= 2.*math.pi
+        f_nu /= 2.*math.pi
+        # - read in specifications
+        min_index_t = 0
+        max_index_t = len(f_t)-1
+        for index_t in range(len(f_t)):
+            if f_t[index_t]<dict_subplot["f_t_min"]:
+                min_index_t = index_t
+            elif f_t[index_t]>dict_subplot["f_t_max"]:
+                max_index_t = index_t
+                break
+        f_t = f_t[min_index_t:max_index_t+1]
+        min_index_nu = 0
+        max_index_nu = len(f_nu)-1
+        for index_nu in range(len(f_nu)):
+            if f_nu[index_nu]<dict_subplot["f_nu_min"]:
+                min_index_nu = index_nu
+            elif f_nu[index_nu]>dict_subplot["f_nu_max"]:
+                max_index_nu = index_nu
+                break
+        f_nu = f_nu[min_index_nu:max_index_nu+1]
+        SecSpec = SecSpec[min_index_t:max_index_t+1,min_index_nu:max_index_nu+1]
+        # - downsampling
+        f_t_sampling = dict_subplot["f_t_sampling"]
+        f_nu_sampling = dict_subplot["f_nu_sampling"]
+        SecSpec = block_reduce(SecSpec, block_size=(f_t_sampling,f_nu_sampling), func=np.mean)
+        coordinates = np.array([f_t,f_t])
+        coordinates = block_reduce(coordinates, block_size=(1,f_t_sampling), func=np.mean, cval=f_t[-1])
+        f_t = coordinates[0,:]
+        coordinates = np.array([f_nu,f_nu])
+        coordinates = block_reduce(coordinates, block_size=(1,f_nu_sampling), func=np.mean, cval=f_nu[-1])
+        f_nu = coordinates[0,:]
+        # - compute offsets to center pccolormesh
+        offset_f_t = (f_t[1]-f_t[0])/2.
+        offset_f_nu = (f_nu[1]-f_nu[0])/2.
+        # - safely remove zeros if there are any
+        min_nonzero = np.min(SecSpec[np.nonzero(SecSpec)])
+        SecSpec[SecSpec == 0] = min_nonzero
+        # - apply logarithmic scale
+        SecSpec_log10 = np.log10(SecSpec)
+        
+        #draw the plot
+        ax.set_xlim([dict_subplot["f_t_min"],dict_subplot["f_t_max"]])
+        ax.set_ylim([dict_subplot["f_nu_min"],dict_subplot["f_nu_max"]])
+        im = ax.pcolormesh(f_t-offset_f_t,f_nu-offset_f_nu,map(list, zip(*SecSpec_log10)),cmap=dict_subplot["cmap"],vmin=dict_subplot["vmin"],vmax=dict_subplot["vmax"])
+        figure.colorbar(im, ax=ax)
+        ax.set_title(dict_subplot["title"])
+        ax.set_xlabel(r"Doppler $f_t$ [Hz]") #(r"$f_x$ [au]") #
+        ax.set_ylabel(r"Delay $f_{\nu}$ [$s$]") #(r"$f_y$ [au]") #
+        
+        print("Successfully plotted secondary spectrum.")
+        
+    def compute_reconstructed_DS(self,path_computation):
+        # - secondary spectrum
+        path_results = os.path.join(self.path_computations,"secondary_spectrum")
+        if not os.path.exists(path_results):
+            warnings.warn("You need to run 'compute secondary_spectrum' first!")
+            return 0
+        file_phase = os.path.join(path_results,"Fourier_phase.npy")
+#        file_doppler = os.path.join(path_computation,"doppler.npy")
+#        file_delay = os.path.join(path_computation,"delay.npy")
+        phase = np.load(file_phase)
+#        f_t = np.load(file_doppler)
+#        f_nu = np.load(file_delay)
+        # - SecSpec_from_thth
+        path_results = os.path.join(self.path_computations,"SecSpec_from_thth")
+        if not os.path.exists(path_results):
+            warnings.warn("You need to run 'compute SecSpec_from_thth' first!")
+            return 0
+        file_power = os.path.join(path_results,"secondary_spectrum.npy")
+#        file_doppler = os.path.join(path_computation,"doppler.npy")
+#        file_delay = os.path.join(path_computation,"delay.npy")
+        SecSpec = np.load(file_power)
+#        f_t = np.load(file_doppler)
+#        f_nu = np.load(file_delay)
+        
+        # telescopes (adapt this to be modifyable!!!)
+        tel1 = 0
+        tel2 = 0
+        
+        #define files to compute
+        file_rds = os.path.join(path_computation,"rds.npy")
+        
+        #create containers
+        rds = np.zeros((self.N_t,self.N_nu),dtype=float)
+        A_theo = np.zeros((self.N_t,self.N_nu),dtype=complex)
+        
+        #perform the computation
+        time_start = time.time()
+        print("Computing reconstructed dynamic spectrum ...")
+        # - reconstruct Fourier transform using original phase
+        A_theo = np.sqrt(SecSpec)/(self.delta_t*self.delta_nu)*np.exp(1.j*phase[tel1,tel2,:,:])
+        # - backtronsform to dynamic spectrum
+        rds = np.fft.ifft2(A_theo)
+
+        #save the results
+        np.save(file_rds,rds)
+        
+        time_current = time.time()-time_start
+        print("{0}s: Successfully computed the reconstructed dynamic spectrum.".format(time_current))
+        
+    def plot_reconstructed_DS(self,dict_plot,figure,ax,tag):
+        #load and check data
+        # - cleaned dynamic spectrum
+        path_results = os.path.join(self.path_computations,"reconstructed_DS")
+        if not os.path.exists(path_results):
+            warnings.warn("You need to run 'compute reconstructed_DS first!")
+            return 0
+        file_rds = os.path.join(path_results,"rds.npy")
+        DynSpec = np.load(file_rds)
+        
+        #load specifications
+        key_sepcs = "plot_reconstructed_dynamic_spectrum{0}".format(tag)
+        if not key_sepcs in dict_plot:
+            dict_subplot = {"cmap":'viridis',"vmin":-1.,"vmax":float(np.max(np.real(DynSpec))),"t_min":float(self.t_min),"t_max":float(self.t_max),"nu_min":float(self.nu_min),"nu_max":float(self.nu_max),
+                            "title":"reconstructed dynamic spectrum","t_sampling":1,"nu_sampling":1}
+            dict_plot.update({key_sepcs:dict_subplot})
+        else:
+            dict_subplot = dict_plot[key_sepcs]
+        
+        #Preprocess data
+        # - cut off out of range data
+        min_index_t = 0
+        max_index_t = len(self.t)-1
+        for index_t in range(len(self.t)):
+            if self.t[index_t]<dict_subplot["t_min"]:
+                min_index_t = index_t
+            elif self.t[index_t]>dict_subplot["t_max"]:
+                max_index_t = index_t
+                break
+        t = self.t[min_index_t:max_index_t+2]
+        min_index_nu = 0
+        max_index_nu = len(self.nu)-1
+        for index_nu in range(len(self.nu)):
+            if self.nu[index_nu]<dict_subplot["nu_min"]:
+                min_index_nu = index_nu
+            elif self.nu[index_nu]>dict_subplot["nu_max"]:
+                max_index_nu = index_nu
+                break
+        nu = self.nu[min_index_nu:max_index_nu+2]
+        DynSpectrum = np.real(DynSpec[min_index_t:max_index_t+2,min_index_nu:max_index_nu+2])
+        # - downsampling
+        t_sampling = dict_subplot["t_sampling"]
+        nu_sampling = dict_subplot["nu_sampling"]
+        DynSpectrum = block_reduce(DynSpectrum, block_size=(t_sampling,nu_sampling), func=np.mean)
+        coordinates = np.array([t,t])
+        coordinates = block_reduce(coordinates, block_size=(1,t_sampling), func=np.mean, cval=t[-1])
+        t = coordinates[0,:]
+        coordinates = np.array([nu,nu])
+        coordinates = block_reduce(coordinates, block_size=(1,nu_sampling), func=np.mean, cval=nu[-1])
+        nu = coordinates[0,:]
+        # - compute offsets to center pccolormesh
+        offset_t = (t[1]-t[0])/2.
+        offset_nu = (nu[1]-nu[0])/2.
+        
+        #draw the plot
+        ax.set_xlim([dict_subplot["t_min"],dict_subplot["t_max"]])
+        ax.set_ylim([dict_subplot["nu_min"],dict_subplot["nu_max"]])
+        im = ax.pcolormesh(t-offset_t,nu-offset_nu,map(list, zip(*DynSpectrum)),cmap=dict_subplot["cmap"],vmin=dict_subplot["vmin"],vmax=dict_subplot["vmax"])
+        figure.colorbar(im, ax=ax)
+        ax.set_title(dict_subplot["title"])
+        ax.set_xlabel(r"time $t$ [$s$]")
+        ax.set_ylabel(r"frequency $\nu$ [Hz]")
+        
+        print("Successfully plotted reconstructed dynamic spectrum.")
+        
+        
+#-----LINEARIZED SECONDARY SPECTRUM
         
     def plot_lin_sec_spec(self,dict_plot,figure,ax,tag):
         #load and check data
@@ -2321,8 +2906,13 @@ class Scintillation:
         LinSecSpec[LinSecSpec == 0] = min_nonzero
         # - apply logarithmic scale
         SecSpec_log10 = np.log10(LinSecSpec)
+        #SecSpec_log10 = skimage.exposure.equalize_hist(SecSpec_log10,nbins=256)
+        #selem = np.ones((30,30),dtype=int)
+        SecSpec_log10 = cv2.normalize(SecSpec_log10, dst=SecSpec_log10, alpha=0.0, beta=1.0, norm_type=cv2.NORM_MINMAX)
+        selem = morphology.disk(30)
+        SecSpec_log10 = skimage.filters.rank.equalize(SecSpec_log10,selem=selem)
         # - inform about scales
-        print(psin[0],psin[-1],psip[0],psip[-1])
+        print(psin[0],psin[-1],psip[0],psip[-1],np.min(SecSpec_log10),np.max(SecSpec_log10))
         
         #draw the plot
         ax.set_xlim([dict_subplot["psin_min"],dict_subplot["psin_max"]])
@@ -2330,11 +2920,505 @@ class Scintillation:
         im = ax.pcolormesh(psin-offset_n,psip-offset_p,map(list, zip(*SecSpec_log10)),cmap=dict_subplot["cmap"],vmin=dict_subplot["vmin"],vmax=dict_subplot["vmax"])
         figure.colorbar(im, ax=ax)
         ax.set_title(dict_subplot["title"])
-        ax.set_xlabel(r"$\Psi_- = f_t/\nu_0$")
-        ax.set_ylabel(r"$\Psi_+ = f_\nu\nu_0^2/f_t$")
+        ax.set_xlabel(r"$\Psi_- = f_t/\nu_0 \propto \theta_1-\theta_2$")
+        ax.set_ylabel(r"$\Psi_+ = f_\nu\nu_0^2/f_t \propto \theta_1+\theta_2$")
         
         print("Successfully plotted linearized secondary spectrum.")
         
+    def compute_fit_LinSecSpec(self,path_computation):
+        #load specifications
+        file_specs = os.path.join(path_computation,"specs_fitLinSecSpec.yaml")
+        if not os.path.exists(file_specs):
+            dict_specs = {"psip_bounds":[0.1e+15,2.5e+15],"psin_bounds":[0.15e-09,0.8e-09],"psin_fiducial":-0.25e-09}
+            with open(file_specs,'w') as writefile:
+                self.yaml.dump(dict_specs,writefile)
+        else:
+            with open(file_specs,'r') as readfile:
+                dict_specs =self.yaml.load(readfile)
+        psip_bounds = dict_specs["psip_bounds"]
+        psin_bounds = dict_specs["psin_bounds"]
+        psin_fiducial = dict_specs["psin_fiducial"]
+        
+        #load and check data
+        # - linearized secondary spectrum
+        path_results = os.path.join(self.path_computations,"linear_secondary_spectrum")
+        if not os.path.exists(path_results):
+            warnings.warn("You need to run 'compute linear_secondary_spectrum' first!")
+            return 0
+        file_LinSecSpec = os.path.join(path_results,"LinSecSpec.npy")
+        file_psip = os.path.join(path_results,"psip.npy")
+        file_psin = os.path.join(path_results,"psin.npy")
+        LinSecSpec = np.load(file_LinSecSpec)
+        psip = np.load(file_psip)
+        psin = np.load(file_psin)
+        
+        #define files to compute
+        file_slope = os.path.join(path_computation,"slope.npy")
+        file_scale = os.path.join(path_computation,"scale.npy")
+        
+        #create containers
+        # - cut parts that are not fitted
+        psip_mask = np.where((psip>-psip_bounds[1]) & (psip<psip_bounds[1]))[0]
+        psin_mask = np.where((psin>psin_bounds[0]) & (psin<psin_bounds[1]))[0]
+        Spec = LinSecSpec[np.ix_(psin_mask,psip_mask)]
+        psip = psip[psip_mask]
+        psin = psin[psin_mask]
+        psip_flags = np.where((psip>-psip_bounds[0]) & (psip<psip_bounds[0]))[0]
+        idx_fiducial = (np.abs(psin - psin_fiducial)).argmin()
+        mu_fid = Spec[idx_fiducial,:]
+        mu_fid[psip_flags] = np.median(mu_fid)
+        # - prepare arrays of results
+        slope = np.zeros(psin.shape,float)
+        scale = np.zeros(psin.shape,float)
+        
+        # define fit function
+        factor_a = (psip_bounds[1]-psip_bounds[0])/10.
+        def fitfunc(in_mu,in_a,in_b):
+            result = np.copy(in_mu)
+            result[psip_flags] = np.median(result)
+            filler = np.median(result)
+            ip_mu = interpolate.interp1d(psip,result,kind='linear',fill_value='extrapolate')
+            result = ip_mu(psip+in_a*factor_a)*in_b
+            result[psip_flags] = np.median(result)
+            return result
+        
+        #perform the computation
+        time_start = time.time()
+        print("Fitting linearized secondary spectrum ...")
+        # - perform the fit
+        a_max = 10.
+        b_max = np.max(Spec)/np.min(Spec)
+        for i_psin,v_psin in enumerate(psin):
+            if not v_psin==psin_fiducial:
+                mu = Spec[i_psin,:]
+                mu[psip_flags] = np.median(mu)
+                popt, pcov = curve_fit(fitfunc,mu,mu_fid,p0=[2.5e+24*(v_psin-psin_fiducial)/factor_a,1.],bounds=([1.0e+24*(v_psin-psin_fiducial)/factor_a,0.],[4.0e+24*(v_psin-psin_fiducial)/factor_a,b_max]),maxfev=1000)
+                #perr = np.sqrt(np.diag(pcov))
+                slope[i_psin] = popt[0]/(v_psin-psin_fiducial)*factor_a
+                scale[i_psin] = popt[1]
+            else:
+                slope[i_psin] = 0.
+                scale[i_psin] = 1.
+#        bar = progressbar.ProgressBar(maxval=self.N_t, widgets=[progressbar.Bar('=', '[', ']'), ' ', progressbar.Percentage()])
+#        bar.start()
+#        for i_f_t,v_f_t in enumerate(f_t):
+#            bar.update(i_f_t)
+#            for i_psip,v_psip in enumerate(psip):
+#                v_f_nu = v_psip*v_f_t/self.nu_half**2
+#                LinSecSpec[i_f_t,i_psip] = ip_SecSpec(v_f_nu,v_f_t)
+#        bar.finish()
+        
+        #save the results
+        np.save(file_slope,slope)
+        np.save(file_scale,scale)
+        
+        time_current = time.time()-time_start
+        print("{0}s: Successfully fitted the linearized secondary spectrum.".format(time_current))
+        
+    def plot_Hist_fitLinSecSpec(self,dict_plot,figure,ax,tag):
+        #load and check data
+        # - Hough transformed linearized secondary spectrum
+        path_results = os.path.join(self.path_computations,"fit_LinSecSpec")
+        if not os.path.exists(path_results):
+            warnings.warn("You need to run 'compute fit_LinSecSpec' first!")
+            return 0
+        file_slope = os.path.join(path_results,"slope.npy")
+        file_scale = os.path.join(path_results,"scale.npy")
+        slope = np.load(file_slope)
+        scale = np.load(file_scale)
+        # inform about scales
+        print("slope [{0},{1}], scale [{2},{3}]".format(np.min(slope),np.max(slope),np.min(scale),np.max(scale)))
+        print(np.median(slope),4.*math.pi/self.LightSpeed/self.nu_half*(319.0*1000.*np.cos(np.deg2rad(-16.0)))**2/self.pc*np.median(slope))
+        
+        #load specifications
+        key_sepcs = "plot_Hist_fitLinSecSpec{0}".format(tag)
+        if not key_sepcs in dict_plot:
+            dict_subplot = {"cmap":'viridis',"slope_min":float(np.min(slope)),"slope_max":float(np.max(slope)),"nbins":10,
+                            "title":"curvature"}
+            dict_plot.update({key_sepcs:dict_subplot})
+        else:
+            dict_subplot = dict_plot[key_sepcs]
+        
+        #draw the plot
+        ax.hist(slope,bins=dict_subplot["nbins"],range=(dict_subplot["slope_min"],dict_subplot["slope_max"]))
+        ax.set_title(dict_subplot["title"])
+        ax.set_xlabel(r"slope [au]")
+        ax.set_ylabel(r"counts")
+        
+        print("Successfully plotted fitted slope of linearized secondary spectrum.")
+        
+    def compute_AC_LinSecSpec(self,path_computation):
+        #load specifications
+        file_specs = os.path.join(path_computation,"specs_AC_LinSecSpec.yaml")
+        if not os.path.exists(file_specs):
+            dict_specs = {"psip_max":3.5e+15,"psin_max":1.0e-09,"psip_sampling":10,"psin_sampling":10,"vmin":12.0,"vmax":15.5}
+            with open(file_specs,'w') as writefile:
+                self.yaml.dump(dict_specs,writefile)
+        else:
+            with open(file_specs,'r') as readfile:
+                dict_specs =self.yaml.load(readfile)
+        psip_max = dict_specs["psip_max"]
+        psin_max = dict_specs["psin_max"]
+        psip_sampling = dict_specs["psip_sampling"]
+        psin_sampling = dict_specs["psin_sampling"]
+        vmin = dict_specs["vmin"]
+        vmax = dict_specs["vmax"]
+        
+        #load and check data
+        # - linearized secondary spectrum
+        path_results = os.path.join(self.path_computations,"linear_secondary_spectrum")
+        if not os.path.exists(path_results):
+            warnings.warn("You need to run 'compute linear_secondary_spectrum' first!")
+            return 0
+        file_LinSecSpec = os.path.join(path_results,"LinSecSpec.npy")
+        file_psip = os.path.join(path_results,"psip.npy")
+        file_psin = os.path.join(path_results,"psin.npy")
+        LinSecSpec = np.load(file_LinSecSpec)
+        psip = np.load(file_psip)
+        psin = np.load(file_psin)
+#        N_psip = len(psip)
+#        N_psin = len(psin)
+        
+        #define files to compute
+        file_autocorr = os.path.join(path_computation,"autocorr.npy")
+        file_sepp = os.path.join(path_computation,"separation_psip.npy")
+        file_sepn = os.path.join(path_computation,"separation_psin.npy")
+        
+        #create containers
+#        autocorr = np.zeros((2*N_psin-1,2*N_psip-1),dtype=float)
+#        N_sepn = 2*N_psin-1
+#        sepn = np.linspace(psin[0]-psin[-1],psin[-1]-psin[0],num=N_sepn)
+#        N_sepp = 2*N_psip-1
+#        sepp = np.linspace(psip[0]-psip[-1],psip[-1]-psip[0],num=N_sepp)
+        psip_mask = np.where((psip>-psip_max) & (psip<psip_max))[0]
+        psin_mask = np.where((psin>-psin_max) & (psin<psin_max))[0]
+        LinSecSpec = LinSecSpec[np.ix_(psin_mask,psip_mask)]
+        psip = psip[psip_mask]
+        psin = psin[psin_mask]
+        autocorr = np.zeros(LinSecSpec.shape,dtype=float)
+        sepn = psin-np.mean(psin)
+        sepp = psip-np.mean(psip)
+        # - downsampling
+        LinSecSpec = block_reduce(LinSecSpec, block_size=(psin_sampling,psip_sampling), func=np.mean)
+        coordinates = np.array([sepn,sepn])
+        coordinates = block_reduce(coordinates, block_size=(1,psin_sampling), func=np.mean, cval=sepn[-1])
+        sepn = coordinates[0,:]
+        coordinates = np.array([sepp,sepp])
+        coordinates = block_reduce(coordinates, block_size=(1,psip_sampling), func=np.mean, cval=sepp[-1])
+        sepp = coordinates[0,:]
+        
+        #perform the computation
+        time_start = time.time()
+        print("Computing autocorrelation ...")
+        # - apply logarithmic scale
+        min_nonzero = np.min(LinSecSpec[np.nonzero(LinSecSpec)])
+        LinSecSpec[LinSecSpec == 0] = min_nonzero
+        Spec = np.log10(LinSecSpec)
+        # - normalize spectra
+#        sortened = np.sort(Spec,axis=None)
+#        Num = len(sortened)
+#        Lowest = sortened[int(0.1*Num)]
+#        Highest = sortened[int(0.9*Num)]
+        Lowest = vmin
+        Highest = vmax
+        Spec[Spec<Lowest] = Lowest
+        Spec[Spec>Highest] = Highest
+        Spec = (Spec-np.min(Spec))/np.std(Spec)
+        # - compute autocorrelation
+        autocorr = signal.correlate2d(Spec,Spec,mode="same")
+        
+        #save the results
+        np.save(file_autocorr,autocorr)
+        np.save(file_sepp,sepp)
+        np.save(file_sepn,sepn)
+        
+        time_current = time.time()-time_start
+        print("{0}s: Successfully computed the autocorrelation of the linearized secondary spectrum.".format(time_current))
+        
+    def plot_AC_LinSecSpec(self,dict_plot,figure,ax,tag):
+        #load and check data
+        # - Hough transformed linearized secondary spectrum
+        path_results = os.path.join(self.path_computations,"AC_LinSecSpec")
+        if not os.path.exists(path_results):
+            warnings.warn("You need to run 'compute AC_LinSecSpec' first!")
+            return 0
+        file_autocorr = os.path.join(path_results,"autocorr.npy")
+        file_sepp = os.path.join(path_results,"separation_psip.npy")
+        file_sepn = os.path.join(path_results,"separation_psin.npy")
+        autocorr = np.load(file_autocorr)
+        sepp = np.load(file_sepp)
+        sepn = np.load(file_sepn)
+        # inform about scales
+        print("sepp [{0},{1}], sepn [{2},{3}], autocorr [{4},{5}]".format(sepp[0],sepp[-1],sepn[0],sepn[-1],np.min(autocorr),np.max(autocorr)))
+        
+        #load specifications
+        key_sepcs = "plot_AC_LinSecSpec{0}".format(tag)
+        if not key_sepcs in dict_plot:
+            dict_subplot = {"cmap":'viridis',"vmin":0.,"vmax":20.,"sepp_min":None,"sepp_max":None,"sepn_min":None,"sepn_max":None,
+                            "title":"AC of linearized secondary spectrum"}
+            dict_plot.update({key_sepcs:dict_subplot})
+        else:
+            dict_subplot = dict_plot[key_sepcs]
+        
+        #Preprocess data
+        # - compute offsets to center pccolormesh
+        offset_p = (sepp[1]-sepp[0])/2.
+        offset_n = (sepn[1]-sepn[0])/2.
+        
+        #draw the plot
+        ax.set_xlim([dict_subplot["sepn_min"],dict_subplot["sepn_max"]])
+        ax.set_ylim([dict_subplot["sepp_min"],dict_subplot["sepp_max"]])
+        im = ax.pcolormesh(sepn-offset_n,sepp-offset_p,map(list, zip(*autocorr)),cmap=dict_subplot["cmap"],vmin=dict_subplot["vmin"],vmax=dict_subplot["vmax"])
+        figure.colorbar(im, ax=ax)
+        ax.set_title(dict_subplot["title"])
+        ax.set_xlabel(r"$\Delta \Psi_-$")
+        ax.set_ylabel(r"$\Delta \Psi_+$")
+        
+        print("Successfully plotted autocorrelation of linearized secondary spectrum.")
+        
+    def compute_FFT_linsecspec(self,path_computation):
+        #load and check data
+        # - linearized secondary spectrum
+        path_results = os.path.join(self.path_computations,"linear_secondary_spectrum")
+        if not os.path.exists(path_results):
+            warnings.warn("You need to run 'compute linear_secondary_spectrum' first!")
+            return 0
+        file_LinSecSpec = os.path.join(path_results,"LinSecSpec.npy")
+        file_psip = os.path.join(path_results,"psip.npy")
+        file_psin = os.path.join(path_results,"psin.npy")
+        LinSecSpec = np.load(file_LinSecSpec)
+        psip = np.load(file_psip)
+        psin = np.load(file_psin)
+        
+        #crop data
+        psip_min = -3.5e+15 #0.4e+15
+        psip_max = 3.5e+15
+        psin_min = 0.1e-09 #-1.0e+09
+        psin_max = 1.0e+09
+        psip_mask = np.where((psip>psip_min) & (psip<psip_max))[0]
+        psin_mask = np.where((psin>psin_min) & (psin<psin_max))[0]
+        LinSecSpec = LinSecSpec[np.ix_(psin_mask,psip_mask)]
+        psip = psip[psip_mask]
+        psin = psin[psin_mask]
+        N_psip = len(psip)
+        N_psin = len(psin)
+        
+        #define files to compute
+        file_power = os.path.join(path_computation,"power.npy")
+        file_fp = os.path.join(path_computation,"fp.npy")
+        file_fn = os.path.join(path_computation,"fn.npy")
+        
+        #create containers
+        delta_p = psip[1]-psip[0]
+        delta_n = psin[1]-psin[0]
+        power = np.zeros((N_psin,N_psip),dtype=float)
+        fp = np.linspace(-math.pi/delta_p,math.pi/delta_p,num=N_psip,endpoint=False)
+        fn = np.linspace(-math.pi/delta_n,math.pi/delta_n,num=N_psin,endpoint=False)
+        
+        #perform the computation
+        time_start = time.time()
+        print("Computing power spectrum ...")
+        # - apply logarithmic scale
+        min_nonzero = np.min(LinSecSpec[np.nonzero(LinSecSpec)])
+        LinSecSpec[LinSecSpec == 0] = min_nonzero
+        Spec = np.log10(LinSecSpec)
+        # - normalize spectrum
+        #Spec[Spec>15.5] = 15.5
+        Spec = cv2.normalize(Spec, dst=Spec, alpha=0.0, beta=1.0, norm_type=cv2.NORM_MINMAX)
+        selem = morphology.disk(30)
+        Spec = skimage.filters.rank.equalize(Spec,selem=selem)
+        # - compute the power spectrum
+        A_Spec = np.fft.fft2(Spec)
+        A_Spec = np.fft.fftshift(A_Spec)
+        power = np.abs(A_Spec)**2
+        #phase = np.angle(A_DynSpec)
+        
+        #save the results
+        np.save(file_power,power)
+        np.save(file_fp,fp)
+        np.save(file_fn,fn)
+        
+        time_current = time.time()-time_start
+        print("{0}s: Successfully computed the power spectrum of the linearized secondary spectrum.".format(time_current))
+        
+    def plot_FFT_linsecspec(self,dict_plot,figure,ax,tag):
+        #load and check data
+        # - FFT_linsecspec
+        path_computation = os.path.join(self.path_computations,"FFT_linsecspec")
+        if not os.path.exists(path_computation):
+            warnings.warn("You need to run 'compute FFT_linsecspec' first!")
+            return 0
+        file_power = os.path.join(path_computation,"power.npy")
+        file_fn = os.path.join(path_computation,"fn.npy")
+        file_fp = os.path.join(path_computation,"fp.npy")
+        power = np.load(file_power)
+        fn = np.load(file_fn)
+        fp = np.load(file_fp)
+        
+        #load specifications
+        key_sepcs = "plot_FFT_linsecspec{0}".format(tag)
+        if not key_sepcs in dict_plot:
+            dict_subplot = {"cmap":'viridis',"vmin":float(np.nanmin(np.log10(power))),"vmax":float(np.nanmax(np.log10(power))),"fn_min":float(fn[0]),"fn_max":float(fn[-1]),"fp_min":float(fp[0]),"fp_max":float(fp[-1]),
+                            "title":"FFT Linear Spectrum","fn_sampling":1,"fp_sampling":1}
+            dict_plot.update({key_sepcs:dict_subplot})
+        else:
+            dict_subplot = dict_plot[key_sepcs]
+        
+        #Preprocess data
+#        # - sparate 2pi from the Fourier frequency
+#        fn /= 2.*math.pi
+#        fp /= 2.*math.pi
+        # - read in specifications
+        min_index_t = 0
+        max_index_t = len(fn)-1
+        for index_t in range(len(fn)):
+            if fn[index_t]<dict_subplot["fn_min"]:
+                min_index_t = index_t
+            elif fn[index_t]>dict_subplot["fn_max"]:
+                max_index_t = index_t
+                break
+        fn = fn[min_index_t:max_index_t+1]
+        min_index_nu = 0
+        max_index_nu = len(fp)-1
+        for index_nu in range(len(fp)):
+            if fp[index_nu]<dict_subplot["fp_min"]:
+                min_index_nu = index_nu
+            elif fp[index_nu]>dict_subplot["fp_max"]:
+                max_index_nu = index_nu
+                break
+        fp = fp[min_index_nu:max_index_nu+1]
+        Spec = power[min_index_t:max_index_t+1,min_index_nu:max_index_nu+1]
+        # - downsampling
+        fn_sampling = dict_subplot["fn_sampling"]
+        fp_sampling = dict_subplot["fp_sampling"]
+        Spec = block_reduce(Spec, block_size=(fn_sampling,fp_sampling), func=np.mean)
+        coordinates = np.array([fn,fn])
+        coordinates = block_reduce(coordinates, block_size=(1,fn_sampling), func=np.mean, cval=fn[-1])
+        fn = coordinates[0,:]
+        coordinates = np.array([fp,fp])
+        coordinates = block_reduce(coordinates, block_size=(1,fp_sampling), func=np.mean, cval=fp[-1])
+        fp = coordinates[0,:]
+        # - compute offsets to center pccolormesh
+        offset_fn = (fn[1]-fn[0])/2.
+        offset_fp = (fp[1]-fp[0])/2.
+        # - safely remove zeros if there are any
+        min_nonzero = np.min(Spec[np.nonzero(Spec)])
+        Spec[Spec == 0] = min_nonzero
+        # - apply logarithmic scale
+        Spec_log10 = np.log10(Spec)
+        
+        #draw the plot
+        ax.set_xlim([dict_subplot["fn_min"],dict_subplot["fn_max"]])
+        ax.set_ylim([dict_subplot["fp_min"],dict_subplot["fp_max"]])
+        im = ax.pcolormesh(fn-offset_fn,fp-offset_fp,map(list, zip(*Spec_log10)),cmap=dict_subplot["cmap"],vmin=dict_subplot["vmin"],vmax=dict_subplot["vmax"])
+        figure.colorbar(im, ax=ax)
+        ax.set_title(dict_subplot["title"])
+        ax.set_xlabel(r"$f_-$")
+        ax.set_ylabel(r"$f_+$")
+        
+        print("Successfully plotted the power spectrum of the linearized secondary spectrum.")
+        
+    def compute_FFT_linsecspec_weights(self,path_computation):
+        #load and check data
+        # - FFT_linsecspec
+        path_results = os.path.join(self.path_computations,"FFT_linsecspec")
+        if not os.path.exists(path_results):
+            warnings.warn("You need to run 'compute FFT_linsecspec' first!")
+            return 0
+        file_power = os.path.join(path_results,"power.npy")
+        file_fn = os.path.join(path_results,"fn.npy")
+        file_fp = os.path.join(path_results,"fp.npy")
+        power = np.load(file_power)
+        fn = np.load(file_fn)
+        fp = np.load(file_fp)
+        
+        #define files to compute
+        file_weights = os.path.join(path_computation,"weights.npy")
+        file_slopes = os.path.join(path_computation,"slopes.npy")
+        
+        #crop data
+        min_fn = 0.6e+11
+        min_fp = np.min(fp)
+        fn_mask = np.where((fn>=min_fn))[0]
+        fp_mask = np.where((fp>=min_fp))[0]
+        power = power[np.ix_(fn_mask,fp_mask)]
+        fp = fp[fp_mask]
+        fn = fn[fn_mask]
+        N_fp = len(fp)
+        N_fn = len(fn)
+        
+        #perform the computation
+        time_start = time.time()
+        print("Summing pixels ...")
+        slopes = np.zeros(fp.shape,dtype=float)
+        for i_fp,v_fp in enumerate(fp):
+            slopes[i_fp] = v_fp/fn[-1]
+        weight = np.zeros(slopes.shape,dtype=float)
+        bar = progressbar.ProgressBar(maxval=N_fn, widgets=[progressbar.Bar('=', '[', ']'), ' ', progressbar.Percentage()])
+        bar.start()
+        for i_fn,v_fn in enumerate(fn):
+            bar.update(i_fn)
+            for i_slope,v_slope in enumerate(slopes):
+                i_fp = int((v_slope*v_fn-fp[0])/(fp[-1]-fp[0])*N_fp-0.5)
+                weight[i_slope] += power[i_fn,i_fp]
+        bar.finish()
+        
+        #save the results
+        np.save(file_weights,weight)
+        np.save(file_slopes,slopes)
+        
+        time_current = time.time()-time_start
+        print("{0}s: Successfully computed the weights of slopes.".format(time_current))
+        
+    def plot_FFT_linsecspec_weights(self,dict_plot,figure,ax,tag):
+        #load and check data
+        # - FFT weights
+        path_results = os.path.join(self.path_computations,"FFT_linsecspec_weights")
+        if not os.path.exists(path_results):
+            warnings.warn("You need to run 'compute FFT_linsecspec_weights' first!")
+            return 0
+        file_weights = os.path.join(path_results,"weights.npy")
+        file_slopes = os.path.join(path_results,"slopes.npy")
+        weights = np.load(file_weights)
+        slopes = np.load(file_slopes)
+        #inform about scales
+        print("weights:[{0},{1}], slopes:[{2},{3}]".format(np.min(weights),np.max(weights),slopes[0],slopes[-1]))
+        
+        #load specifications
+        key_sepcs = "plot_FFT_linsecspec_weights{0}".format(tag)
+        if not key_sepcs in dict_plot:
+            dict_subplot = {"sum_min":None,"sum_max":None, "cutoff":0.,
+                            "title":"weights of FFT slopes"}
+            dict_plot.update({key_sepcs:dict_subplot})
+        else:
+            dict_subplot = dict_plot[key_sepcs]
+            
+        #find peaks
+        cutoff = dict_subplot["cutoff"]
+        mpeak = np.max(weights[slopes<-cutoff])
+        ppeak = np.max(weights[slopes>cutoff])
+        mpeak = slopes[np.where(weights==mpeak)[0]][0]
+        ppeak = slopes[np.where(weights==ppeak)[0]][0]
+        list_peak = [np.abs(mpeak),np.abs(ppeak)]
+        print(mpeak,ppeak,np.mean(list_peak),np.std(list_peak))
+        eta = 1./(np.mean(list_peak)*self.nu_half**3)*2.*math.pi
+        sig_eta = np.std(list_peak)/(np.mean(list_peak)**2*self.nu_half**3)*2.*math.pi
+        print("--> slope eta={0} +/- {1} s^3".format(eta,sig_eta))
+        
+        #draw the plot
+        ax.set_xlim([slopes[0],slopes[-1]])
+        ax.set_ylim([dict_subplot["sum_min"],dict_subplot["sum_max"]])
+        ax.plot(slopes,weights,label=r"FFT slope weight")
+        ax.axvline(dict_subplot["cutoff"],color="red",linestyle='dashed')
+        ax.axvline(-dict_subplot["cutoff"],color="red",linestyle='dashed')
+        ax.axvline(mpeak,color="blue",linestyle='dashed')
+        ax.axvline(ppeak,color="blue",linestyle='dashed')
+        ax.set_title(dict_subplot["title"])
+        ax.set_xlabel("slope $f_+/f_-$")
+        ax.set_ylabel(r"weight")
+        plt.grid(True)
+        
+        print("Successfully plotted the weights of slopes.")
         
 #-----AUTOCORRELATION-----
         
@@ -2982,6 +4066,259 @@ class Scintillation:
         np.save(file_theta_transform,theta_transform)
         
         print("{0}s: Successfully computed the theta transform of the data.".format(time.time()-time_start))
+        
+#-----Fourier analysis-----    
+        
+    def compute_cleaned_dynamic_spectrum(self,path_computation):
+        #load and check data
+        DynSpec = np.load(os.path.join(self.path_data,"DynSpec.npy"))
+        flags = np.load(os.path.join(self.path_data,"flags.npy"))
+        
+        #define files to compute
+        file_cds = os.path.join(path_computation,"cds.npy")
+#        file_doppler = os.path.join(path_computation,"doppler.npy")
+#        file_delay = os.path.join(path_computation,"delay.npy")
+        
+        #create containers
+        SecSpec = np.zeros((self.N_p,self.N_p,self.N_t,self.N_nu),dtype=complex)
+#        f_t = np.linspace(-math.pi/self.delta_t,math.pi/self.delta_t,num=self.N_t,endpoint=False)
+#        f_nu = np.linspace(-math.pi/self.delta_nu,math.pi/self.delta_nu,num=self.N_nu,endpoint=False)
+        
+        #perform the computation
+        time_start = time.time()
+        print("Computing cleaned dynamic spectrum ...")
+        # - remove flagged data
+        DynSpec[:,:,flags] = 0.
+        # - compute the 2d Fourier transform
+        SecSpec = np.fft.fft2(DynSpec,axes=(2,3))
+        # - reduce noise
+#        SecSpec -= np.median(SecSpec,axis=3)[:,:,:,na]
+        # - delete x and y axis
+#        center = 0.
+#        center = SecSpec[:,:,0,0]
+        SecSpec[:,:,0,:] = 0.
+#        SecSpec[:,:,1,:] = 0.
+#        SecSpec[:,:,2,:] = 0.
+#        SecSpec[:,:,3,:] = 0.
+#        SecSpec[:,:,-1,:] = 0.
+#        SecSpec[:,:,-2,:] = 0.
+#        SecSpec[:,:,-3,:] = 0.
+        SecSpec[:,:,:,0] = 0.
+#        SecSpec[:,:,:,1] = 0.
+#        SecSpec[:,:,:,-1] = 0.
+#        SecSpec[:,:,0,0] = center
+#        SecSpec = np.abs(SecSpec)
+        threshold = np.median(np.abs(SecSpec),axis=(2,3))
+        for i_p1 in range(self.N_p):
+            for i_p2 in range(self.N_p):
+                spec = SecSpec[i_p1,i_p2,:,:]
+                spec[spec<threshold[i_p1,i_p2]] = 0.
+                SecSpec[i_p1,i_p2,:,:] = spec
+        # - backtronsform to dynamic spectrum
+        cds = np.fft.ifft2(SecSpec,axes=(2,3))
+        # - normalize columns
+        for i_p1 in range(self.N_p):
+            for i_p2 in range(self.N_p):
+                DySpe = np.abs(DynSpec[i_p1,i_p2,:,:])
+                median = np.median(DySpe[np.nonzero(DySpe)])
+                DySpe[DySpe==0.] = median
+                orig_upper = np.sort(DySpe,axis=None)[int(0.9*self.N_t*self.N_nu)]
+                orig_lower = np.sort(DySpe,axis=None)[int(0.1*self.N_t*self.N_nu)]
+                orig_range = orig_upper - orig_lower
+                for i_t in xrange(self.N_t):
+                    upper = np.sort(np.abs(cds[i_p1,i_p2,i_t,:]),axis=None)[int(0.9*self.N_nu)]
+                    lower = np.sort(np.abs(cds[i_p1,i_p2,i_t,:]),axis=None)[int(0.1*self.N_nu)]
+                    trange = upper - lower
+                    # - will not work for complex numbers
+                    cds[i_p1,i_p2,i_t,:] = (cds[i_p1,i_p2,i_t,:]-lower)/trange*orig_range+orig_lower
+        #save the results
+        np.save(file_cds,cds)
+        
+        time_current = time.time()-time_start
+        print("{0}s: Successfully computed the cleaned dynamic spectrum.".format(time_current))
+        
+    def plot_cleaned_dynamic_spectrum(self,dict_plot,figure,ax,tag):
+        #load and check data
+        # - cleaned dynamic spectrum
+        path_results = os.path.join(self.path_computations,"cleaned_dynamic_spectrum")
+        if not os.path.exists(path_results):
+            warnings.warn("You need to run 'compute cleaned_dynamic_spectrum' first!")
+            return 0
+        file_cds = os.path.join(path_results,"cds.npy")
+        DynSpec = np.load(file_cds)
+        
+        #load specifications
+        key_sepcs = "plot_cleaned_dynamic_spectrum{0}".format(tag)
+        if not key_sepcs in dict_plot:
+            dict_subplot = {"cmap":'viridis',"vmin":-1.,"vmax":float(np.max(np.real(DynSpec))),"t_min":float(self.t_min),"t_max":float(self.t_max),"nu_min":float(self.nu_min),"nu_max":float(self.nu_max),
+                            "telescope1":0,"telescope2":0,"title":"cleaned dynamic spectrum","t_sampling":1,"nu_sampling":1} # $I$ [$W/m^2$]
+            dict_plot.update({key_sepcs:dict_subplot})
+        else:
+            dict_subplot = dict_plot[key_sepcs]
+        
+        #Preprocess data
+        # - read in specifications
+        tel1 = dict_subplot["telescope1"]
+        tel2 = dict_subplot["telescope2"]
+        # - cut off out of range data
+        min_index_t = 0
+        max_index_t = len(self.t)-1
+        for index_t in range(len(self.t)):
+            if self.t[index_t]<dict_subplot["t_min"]:
+                min_index_t = index_t
+            elif self.t[index_t]>dict_subplot["t_max"]:
+                max_index_t = index_t
+                break
+        t = self.t[min_index_t:max_index_t+2]
+        min_index_nu = 0
+        max_index_nu = len(self.nu)-1
+        for index_nu in range(len(self.nu)):
+            if self.nu[index_nu]<dict_subplot["nu_min"]:
+                min_index_nu = index_nu
+            elif self.nu[index_nu]>dict_subplot["nu_max"]:
+                max_index_nu = index_nu
+                break
+        nu = self.nu[min_index_nu:max_index_nu+2]
+        DynSpectrum = np.real(DynSpec[tel1,tel2,min_index_t:max_index_t+2,min_index_nu:max_index_nu+2])
+        # - downsampling
+        t_sampling = dict_subplot["t_sampling"]
+        nu_sampling = dict_subplot["nu_sampling"]
+        DynSpectrum = block_reduce(DynSpectrum, block_size=(t_sampling,nu_sampling), func=np.mean)
+        coordinates = np.array([t,t])
+        coordinates = block_reduce(coordinates, block_size=(1,t_sampling), func=np.mean, cval=t[-1])
+        t = coordinates[0,:]
+        coordinates = np.array([nu,nu])
+        coordinates = block_reduce(coordinates, block_size=(1,nu_sampling), func=np.mean, cval=nu[-1])
+        nu = coordinates[0,:]
+        # - compute offsets to center pccolormesh
+        offset_t = (t[1]-t[0])/2.
+        offset_nu = (nu[1]-nu[0])/2.
+        
+        #draw the plot
+        ax.set_xlim([dict_subplot["t_min"],dict_subplot["t_max"]])
+        ax.set_ylim([dict_subplot["nu_min"],dict_subplot["nu_max"]])
+        im = ax.pcolormesh(t-offset_t,nu-offset_nu,map(list, zip(*DynSpectrum)),cmap=dict_subplot["cmap"],vmin=dict_subplot["vmin"],vmax=dict_subplot["vmax"])
+        figure.colorbar(im, ax=ax)
+        ax.set_title(dict_subplot["title"])
+        ax.set_xlabel(r"time $t$ [$s$]")
+        ax.set_ylabel(r"frequency $\nu$ [Hz]")
+        
+        print("Successfully plotted cleaned dynamic spectrum.")
+        
+    def compute_SecSpec_from_cds(self,path_computation):
+        #load and check data
+        # - cleaned dynamic spectrum
+        path_results = os.path.join(self.path_computations,"cleaned_dynamic_spectrum")
+        if not os.path.exists(path_results):
+            warnings.warn("You need to run 'compute cleaned_dynamic_spectrum' first!")
+            return 0
+        file_cds = os.path.join(path_results,"cds.npy")
+        DynSpec = np.load(file_cds)
+        
+        #define files to compute
+        file_power = os.path.join(path_computation,"secondary_spectrum.npy")
+        file_doppler = os.path.join(path_computation,"doppler.npy")
+        file_delay = os.path.join(path_computation,"delay.npy")
+        
+        #create containers
+        SecSpec = np.zeros((self.N_p,self.N_p,self.N_t,self.N_nu),dtype=float)
+        f_t = np.linspace(-math.pi/self.delta_t,math.pi/self.delta_t,num=self.N_t,endpoint=False)
+        f_nu = np.linspace(-math.pi/self.delta_nu,math.pi/self.delta_nu,num=self.N_nu,endpoint=False)
+        
+        #perform the computation
+        time_start = time.time()
+        print("Computing secondary spectrum from cleaned dynamic spectrum ...")
+        # - compute the power spectrum
+        A_DynSpec = np.fft.fft2(DynSpec,axes=(2,3))
+        A_DynSpec = np.fft.fftshift(A_DynSpec,axes=(2,3))
+        SecSpec = self.delta_nu**2*self.delta_t**2*np.abs(A_DynSpec)**2
+        
+        #save the results
+        np.save(file_power,SecSpec)
+        np.save(file_doppler,f_t)
+        np.save(file_delay,f_nu)
+        
+        time_current = time.time()-time_start
+        print("{0}s: Successfully computed the secondary spectrum from cleaned dynamic spectrum.".format(time_current))
+        
+    def plot_SecSpec_from_cds(self,dict_plot,figure,ax,tag):
+        #load and check data
+        # - secondary spectrum from cleaned dynamic spectrum
+        path_computation = os.path.join(self.path_computations,"SecSpec_from_cds")
+        if not os.path.exists(path_computation):
+            warnings.warn("You need to run 'compute SecSpec_from_cds' first!")
+            return 0
+        file_power = os.path.join(path_computation,"secondary_spectrum.npy")
+        file_doppler = os.path.join(path_computation,"doppler.npy")
+        file_delay = os.path.join(path_computation,"delay.npy")
+        SecSpec = np.load(file_power)
+        f_t = np.load(file_doppler)
+        f_nu = np.load(file_delay)
+        
+        #load specifications
+        key_sepcs = "plot_SecSpec_from_cds{0}".format(tag)
+        if not key_sepcs in dict_plot:
+            dict_subplot = {"cmap":'viridis',"vmin":0.,"vmax":float(np.max(np.real(SecSpec))),"f_t_min":float(-1./2./self.delta_t),"f_t_max":float(1./2./self.delta_t),"f_nu_min":0.,"f_nu_max":float(1./2./self.delta_nu),
+                            "telescope1":0,"telescope2":0,"title":"cleaned secondary spectrum (log10)","f_t_sampling":1,"f_nu_sampling":1} # $P$ [$(W/m^2)^2$]
+            dict_plot.update({key_sepcs:dict_subplot})
+        else:
+            dict_subplot = dict_plot[key_sepcs]
+        
+        #Preprocess data
+        # - sparate 2pi from the Fourier frequency
+        f_t /= 2.*math.pi
+        f_nu /= 2.*math.pi
+        # - read in specifications
+        tel1 = dict_subplot["telescope1"]
+        tel2 = dict_subplot["telescope2"]
+        min_index_t = 0
+        max_index_t = len(f_t)-1
+        for index_t in range(len(f_t)):
+            if f_t[index_t]<dict_subplot["f_t_min"]:
+                min_index_t = index_t
+            elif f_t[index_t]>dict_subplot["f_t_max"]:
+                max_index_t = index_t
+                break
+        f_t = f_t[min_index_t:max_index_t+1]
+        min_index_nu = 0
+        max_index_nu = len(f_nu)-1
+        for index_nu in range(len(f_nu)):
+            if f_nu[index_nu]<dict_subplot["f_nu_min"]:
+                min_index_nu = index_nu
+            elif f_nu[index_nu]>dict_subplot["f_nu_max"]:
+                max_index_nu = index_nu
+                break
+        f_nu = f_nu[min_index_nu:max_index_nu+1]
+        SecSpec = SecSpec[tel1,tel2,min_index_t:max_index_t+1,min_index_nu:max_index_nu+1]
+        # - downsampling
+        f_t_sampling = dict_subplot["f_t_sampling"]
+        f_nu_sampling = dict_subplot["f_nu_sampling"]
+        SecSpec = block_reduce(SecSpec, block_size=(f_t_sampling,f_nu_sampling), func=np.mean)
+        coordinates = np.array([f_t,f_t])
+        coordinates = block_reduce(coordinates, block_size=(1,f_t_sampling), func=np.mean, cval=f_t[-1])
+        f_t = coordinates[0,:]
+        coordinates = np.array([f_nu,f_nu])
+        coordinates = block_reduce(coordinates, block_size=(1,f_nu_sampling), func=np.mean, cval=f_nu[-1])
+        f_nu = coordinates[0,:]
+        # - compute offsets to center pccolormesh
+        offset_f_t = (f_t[1]-f_t[0])/2.
+        offset_f_nu = (f_nu[1]-f_nu[0])/2.
+        # - safely remove zeros if there are any
+        min_nonzero = np.min(SecSpec[np.nonzero(SecSpec)])
+        SecSpec[SecSpec == 0] = min_nonzero
+        # - apply logarithmic scale
+        SecSpec_log10 = np.log10(SecSpec)
+        
+        #draw the plot
+        ax.set_xlim([dict_subplot["f_t_min"],dict_subplot["f_t_max"]])
+        ax.set_ylim([dict_subplot["f_nu_min"],dict_subplot["f_nu_max"]])
+        im = ax.pcolormesh(f_t-offset_f_t,f_nu-offset_f_nu,map(list, zip(*SecSpec_log10)),cmap=dict_subplot["cmap"],vmin=dict_subplot["vmin"],vmax=dict_subplot["vmax"])
+        figure.colorbar(im, ax=ax)
+        ax.set_title(dict_subplot["title"])
+        ax.set_xlabel(r"Doppler $f_t$ [Hz]") #(r"$f_x$ [au]") #
+        ax.set_ylabel(r"Delay $f_{\nu}$ [$s$]") #(r"$f_y$ [au]") #
+        
+        print("Successfully plotted secondary spectrum.")
         
 #-----------------------OBSOLETE FUNCTIONS------------------------------------------------------------------------------------------------------------------------------------
         

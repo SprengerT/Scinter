@@ -4,7 +4,7 @@ import argparse
 
 from scinter.scintillation import Scintillation
 
-description = "Scinter v2.2"
+description = "Scinter v2.3"
 
 parser = argparse.ArgumentParser(description=description)
 parser.add_argument("data", help="specify the dynamic spectrum you want to analyze")
@@ -25,10 +25,3 @@ elif args.action == "animate":
     scin.animate(args.save,args.archive,args.load)
 elif args.action == "remove":
     scin.remove(args.save)
-
-    
-    
-#specify collection of plots and on-plot analyzes, automatically generate stylefiles and perform necessary computations
-#or disentangle computation and plotting and explicitely perform each computation (renew+archive?) and throw error if something wasn't performed yet
-#make load and archive specific for each task to save memory but allow for being thrown into same folder (obsolete)
-#always create a backup file of the specifications in case an archive is requested

@@ -1,2 +1,5 @@
 #location of produced and processed files (transformed data, specifications, plots)
-output_path: "/homes/tsprenger/Nextcloud/PhD/Code/Scinter2"
+#output_path: "/homes/tsprenger/Nextcloud/PhD/Code/temp"
+#output_path: "/.aux_mnt/pc20235a/tsprengerLOCAL/Scinter2"
+output_path: "/mnt/c/Ubuntu/MPIfR/scinter_data"
+
