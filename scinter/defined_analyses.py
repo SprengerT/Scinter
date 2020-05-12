@@ -112,7 +112,7 @@ class defined_analyses:
                 break
         f_nu = f_nu[min_index_nu:max_index_nu+2]
         # - load parameters and spectrum specific to chosen data source
-        if source_SecSpec[0] in ["secondary_spectrum","nut_SecSpec","iterative_SecSpec"]:
+        if source_SecSpec[0] in ["secondary_spectrum","nut_SecSpec","iterative_SecSpec","SecSpec_divPulseVar","SecSpec_scale_cut"]:
             tel1 = self._add_specification("telescope1",0,dict_subplot)
             tel2 = self._add_specification("telescope2",0,dict_subplot)
             SecSpec = SecSpec[tel1,tel2,min_index_t:max_index_t+2,min_index_nu:max_index_nu+2]
@@ -316,6 +316,167 @@ class defined_analyses:
         
         #define list of data and the categories of plots
         list_category.append("curve")
+        list_data.append(data)
+        
+    def pulse_variation(self,dict_subplot,list_category,list_data):
+        #check which data to use
+        source_PV = self._add_specification("source_PV",["pulse_variation",None,"pulse_variation"],dict_subplot)
+        
+        #load and check data
+        source = scinter_computation(self.dict_paths,source_PV[0])
+        pulse_variation, = source.load_result([source_PV[2]])
+        
+        #load specifications
+        tel1 = self._add_specification("telescope1",0,dict_subplot)
+        tel2 = self._add_specification("telescope2",0,dict_subplot)
+        t_scale = self._add_specification("t_scale",60.,dict_subplot)
+        t_lcut = self._add_specification("t_lcut",float(self.t[0]/t_scale),dict_subplot)
+        t_ucut = self._add_specification("t_ucut",float(self.t[-1]/t_scale),dict_subplot)
+        # - specifications for plotting
+        self._add_specification("title",r"Pulse Variation",dict_subplot)
+        self._add_specification("xlabel",r"$t$ [min]",dict_subplot)
+        self._add_specification("ylabel",r"strength [au]",dict_subplot)
+        
+        #refine data
+        # - apply scale
+        t = self.t/t_scale
+        # - cut off out of range data
+        min_index_t = 0
+        max_index_t = len(t)-1
+        for index_t in range(len(t)):
+            if t[index_t]<t_lcut:
+                min_index_t = index_t
+            elif t[index_t]>t_ucut:
+                max_index_t = index_t
+                break
+        t = t[min_index_t:max_index_t+2]
+        pulse_variation = pulse_variation[tel1,tel2,min_index_t:max_index_t+2]
+        # - define data
+        data = {'N':1,'x0':t,'y0':pulse_variation}
+        
+        #define list of data and the categories of plots
+        list_category.append("curve")
+        list_data.append(data)
+        
+    def DynSpec_corr(self,dict_subplot,list_category,list_data):
+        #check which data to use
+        source_DynSpec = self._add_specification("source_DynSpec",["DynSpec_noPulseVar",None,"DynSpec_noPulseVar"],dict_subplot)
+    
+        #load and check data
+        source = scinter_computation(self.dict_paths,source_DynSpec[0])
+        DynSpec, = source.load_result([source_DynSpec[2]])
+        
+        #load specifications
+        tel1 = self._add_specification("telescope1",0,dict_subplot)
+        tel2 = self._add_specification("telescope2",0,dict_subplot)
+        t_scale = self._add_specification("t_scale",60.,dict_subplot)
+        nu_scale = self._add_specification("nu_scale",1.0e+06,dict_subplot)
+        t_lcut = self._add_specification("t_lcut",float(self.t[0]/t_scale),dict_subplot)
+        t_ucut = self._add_specification("t_ucut",float(self.t[-1]/t_scale),dict_subplot)
+        nu_lcut = self._add_specification("nu_lcut",float(self.nu[0]/nu_scale),dict_subplot)
+        nu_ucut = self._add_specification("nu_ucut",float(self.nu[-1]/nu_scale),dict_subplot)
+        # - specifications for plotting
+        self._add_specification("title",r"Dynamic Spectrum (corrected)",dict_subplot)
+        self._add_specification("xlabel",r"$t$ [min]",dict_subplot)
+        self._add_specification("ylabel",r"$\nu$ [MHz]",dict_subplot)
+        
+        #refine data
+        # - apply scale
+        t = self.t/t_scale
+        nu = self.nu/nu_scale
+        # - cut off out of range data
+        min_index_t = 0
+        max_index_t = len(t)-1
+        for index_t in range(len(t)):
+            if t[index_t]<t_lcut:
+                min_index_t = index_t
+            elif t[index_t]>t_ucut:
+                max_index_t = index_t
+                break
+        t = t[min_index_t:max_index_t+2]
+        min_index_nu = 0
+        max_index_nu = len(nu)-1
+        for index_nu in range(len(nu)):
+            if nu[index_nu]<nu_lcut:
+                min_index_nu = index_nu
+            elif nu[index_nu]>nu_ucut:
+                max_index_nu = index_nu
+                break
+        nu = nu[min_index_nu:max_index_nu+2]
+        DynSpec = np.real(DynSpec[tel1,tel2,min_index_t:max_index_t+2,min_index_nu:max_index_nu+2])
+        # - define data
+        data = {'x':t,'y':nu,'f_xy':DynSpec}
+        
+        #define list of data and the categories of plots
+        list_category.append("colormesh")
+        list_data.append(data)
+        
+    def halfSecSpec(self,dict_subplot,list_category,list_data):
+        #load specifications
+        source_halfSecSpec = self._add_specification("source_halfSecSpec",["halfSecSpec",None,"halfSecSpec"],dict_subplot)
+        source_delay = self._add_specification("source_delay",["secondary_spectrum",None,"delay"],dict_subplot)
+    
+        #load and check data
+        source = scinter_computation(self.dict_paths,source_halfSecSpec[0])
+        halfSecSpec, = source.load_result([source_halfSecSpec[2]])
+        source = scinter_computation(self.dict_paths,source_delay[0])
+        f_nu, = source.load_result([source_delay[2]])
+        
+        # - sparate 2pi from the Fourier frequency
+        f_nu /= 2.*math.pi
+        
+        #load specifications
+        tel1 = self._add_specification("telescope1",0,dict_subplot)
+        tel2 = self._add_specification("telescope2",0,dict_subplot)
+        t_scale = self._add_specification("t_scale",60.,dict_subplot)
+        t_lcut = self._add_specification("t_lcut",float(self.t[0]/t_scale),dict_subplot)
+        t_ucut = self._add_specification("t_ucut",float(self.t[-1]/t_scale),dict_subplot)
+        delay_scale = self._add_specification("delay_scale",1.0e-06,dict_subplot)
+        delay_lcut = self._add_specification("delay_lcut",float(f_nu[0]/delay_scale),dict_subplot)
+        delay_ucut = self._add_specification("delay_ucut",float(f_nu[-1]/delay_scale),dict_subplot)
+        flag_logarithmic = self._add_specification("flag_logarithmic",True,dict_subplot)
+        # - specifications for plotting
+        self._add_specification("title",r"half Secondary Spectrum",dict_subplot)
+        self._add_specification("xlabel",r"$t$ [min]",dict_subplot)
+        self._add_specification("ylabel",r"$\tau$ [$\mu$s]",dict_subplot)
+        
+        #refine data
+        # - apply scale
+        t = self.t/t_scale
+        # - cut off out of range data
+        min_index_t = 0
+        max_index_t = len(t)-1
+        for index_t in range(len(t)):
+            if t[index_t]<t_lcut:
+                min_index_t = index_t
+            elif t[index_t]>t_ucut:
+                max_index_t = index_t
+                break
+        t = t[min_index_t:max_index_t+2]
+        # - apply scale
+        f_nu = f_nu/delay_scale
+        # - cut off out of range data
+        min_index_nu = 0
+        max_index_nu = len(f_nu)-1
+        for index_nu in range(len(f_nu)):
+            if f_nu[index_nu]<delay_lcut:
+                min_index_nu = index_nu
+            elif f_nu[index_nu]>delay_ucut:
+                max_index_nu = index_nu
+                break
+        f_nu = f_nu[min_index_nu:max_index_nu+2]
+        halfSecSpec = halfSecSpec[tel1,tel2,min_index_t:max_index_t+2,min_index_nu:max_index_nu+2]
+        if flag_logarithmic:
+            # - safely remove zeros if there are any
+            min_nonzero = np.min(halfSecSpec[np.nonzero(halfSecSpec)])
+            halfSecSpec[halfSecSpec == 0] = min_nonzero
+            # - apply logarithmic scale
+            halfSecSpec = np.log10(halfSecSpec)
+        # - define data
+        data = {'x':t,'y':f_nu,'f_xy':halfSecSpec}
+        
+        #define list of data and the categories of plots
+        list_category.append("colormesh")
         list_data.append(data)
         
 ################### thth diagram ###################

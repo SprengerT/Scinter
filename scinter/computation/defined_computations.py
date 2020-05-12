@@ -2,6 +2,8 @@ import numpy as np
 from numpy import newaxis as na
 from numpy.ctypeslib import ndpointer
 import scipy
+from scipy.ndimage.filters import uniform_filter1d
+from scipy.optimize import curve_fit
 import math
 import progressbar
 import ctypes
@@ -17,8 +19,16 @@ class defined_computations():
 ################### secondary spectrum ###################
         
     def secondary_spectrum(self):
+        #load specifications
+        DS_source = self._add_specification("DS_source",None) #["DynSpec_connected", None, "DynSpec_connected"]
+        
         #load and check data
-        DynSpec = self._load_base_file("DynSpec")
+        if DS_source==None:
+            DynSpec = self._load_base_file("DynSpec")
+        else:
+            self._warning("Using {0} instead of unprocessed dynamic spectrum.".format(DS_source))
+            source = scinter_computation(self.dict_paths,DS_source[0])
+            DynSpec, = source.load_result([DS_source[2]])
         
         #create containers
         SecSpec = np.zeros((self.N_p,self.N_p,self.N_t,self.N_nu),dtype=float)
@@ -48,8 +58,16 @@ class defined_computations():
         self._add_result(f_nu,"delay")
         
     def nut_SecSpec(self):
+        #load specifications
+        DS_source = self._add_specification("DS_source",None) #["DynSpec_connected", None, "DynSpec_connected"]
+        
         #load and check data
-        DynSpec = self._load_base_file("DynSpec")
+        if DS_source==None:
+            DynSpec = self._load_base_file("DynSpec")
+        else:
+            self._warning("Using {0} instead of unprocessed dynamic spectrum.".format(DS_source))
+            source = scinter_computation(self.dict_paths,DS_source[0])
+            DynSpec, = source.load_result([DS_source[2]])
         
         #import c code for discrete Fourier transform
         lib = self._load_c_lib("nut_transform")
@@ -255,6 +273,241 @@ class defined_computations():
         #save the results
         self._add_result(SecSpec,"secondary_spectrum")
         self._add_result(phase,"Fourier_phase")
+        
+    def pulse_variation(self):
+        #load and check data
+        source = scinter_computation(self.dict_paths,"secondary_spectrum")
+        SSpec,f_t,f_nu,phase = source.load_result(["secondary_spectrum","doppler","delay","Fourier_phase"])
+        
+        #load specifications
+        min_doppler = self._add_specification("min_doppler",0.0)
+        
+        #create containers
+        pulse_variation = np.zeros((self.N_p,self.N_p,self.N_t),dtype=float)
+        line0 = np.zeros((self.N_p,self.N_p,self.N_t),dtype=complex)
+        
+        #perform the computation
+        i_nu0 = np.argwhere(f_nu==0.)[0][0]
+        line0 = SSpec[:,:,:,i_nu0]*np.exp(1.j*phase[:,:,:,i_nu0])
+        is_dop0 = np.argwhere(np.abs(f_t)<=min_doppler)
+        line0[:,:,is_dop0] = 0.
+        pulse_variation = np.abs(np.fft.ifft(line0,axis=2))
+        
+        #save the results
+        self._add_result(pulse_variation,"pulse_variation")
+        
+    def DynSpec_noPulseVar(self):
+        #load and check data
+        DynSpec = self._load_base_file("DynSpec")
+        source = scinter_computation(self.dict_paths,"pulse_variation")
+        pulse_variation, = source.load_result(["pulse_variation"])
+        
+        #load specifications
+        min_DS = self._add_specification("min_amplitude",None)
+        fraction = self._add_specification("fraction",0.9)
+        
+        #create containers
+        DynSpec_noPulseVar = np.real(DynSpec)
+        
+        #perform the computation
+        PulseVar = pulse_variation/self.N_nu
+        DynSpec_noPulseVar = DynSpec_noPulseVar[:,:,:,:]-PulseVar[:,:,:,na]
+        
+        
+        # if not min_DS==None:
+            # DynSpec_noPulseVar[DynSpec_noPulseVar<min_DS] = 0.
+        # N_low = int((1-fraction)*pulse_variation.shape[2])
+        # for i_p1 in range(self.N_p):
+            # for i_p2 in range(self.N_p):
+                # is_low = np.argpartition(np.abs(pulse_variation[i_p1,i_p2,:]), N_low)[:N_low]
+                
+                # scale = pulse_variation[i_p1,i_p2,:] - np.min(pulse_variation[i_p1,i_p2,:])
+                # median_DS = np.median(DynSpec_noPulseVar[i_p1,i_p2,:,:],axis=1)
+                # median_DS -= np.min(median_DS)
+                # DynSpec_noPulseVar[i_p1,i_p2,:,:] = DynSpec_noPulseVar[i_p1,i_p2,:,:]-np.min(median_DS)
+                # max_pulse = np.max(scale)
+                # max_DS = np.max(median_DS)
+                # scale *= max_DS/max_pulse
+                
+                # #DynSpec_noPulseVar[i_p1,i_p2,:,:] = DynSpec_noPulseVar[i_p1,i_p2,:,:]/(scale[:,na]+0.5*max_DS)
+                # DynSpec_noPulseVar[i_p1,i_p2,:,:] = DynSpec_noPulseVar[i_p1,i_p2,:,:]-scale[:,na]
+                
+                # DynSpec_noPulseVar[i_p1,i_p2,is_low,:] = 0.
+                # #pulse_variation[i_p1,i_p2,is_low] = 0.
+                
+                
+        #DynSpec_noPulseVar = DynSpec_noPulseVar[:,:,:,:]/pulse_variation[:,:,:,na]
+        
+        
+        #save the results
+        self._add_result(DynSpec_noPulseVar,"DynSpec_noPulseVar")
+        
+    def DynSpec_connected(self):
+        #load and check data
+        DynSpec = self._load_base_file("DynSpec")
+        
+        #load specifications
+        smooth_steps = self._add_specification("smooth_steps",6)
+        
+        #create containers
+        DSc = np.real(DynSpec)
+        lmean_DSC = np.empty((self.N_t),dtype=float)
+        rmean_DSC = np.empty((self.N_t),dtype=float)
+        
+        #perform the computation
+        for i_p1 in range(self.N_p):
+            for i_p2 in range(self.N_p): 
+                # - compute smoothed spectrum
+                for i_t in range(self.N_t):
+                    v_lmean = 0.
+                    v_rmean = 0.
+                    i_l = np.max([0,i_t-smooth_steps])
+                    i_u = np.min([self.N_t-1,i_t+smooth_steps])
+                    N_lmean = i_t-i_l+1
+                    N_rmean = i_u-i_t+1
+                    for i_mean in range(i_l,i_t+1):
+                        v_lmean += np.mean(DSc[i_p1,i_p2,i_mean,:])
+                    for i_mean in range(i_t,i_u+1):
+                        v_rmean += np.mean(DSc[i_p1,i_p2,i_mean,:])
+                    v_lmean /= N_lmean
+                    v_rmean /= N_rmean
+                    lmean_DSC[i_t] = v_lmean
+                    rmean_DSC[i_t] = v_rmean
+                # - cancel difference that deviates from smoothed trend
+                for i_t in range(1,self.N_t):
+                    delta = np.mean(DSc[i_p1,i_p2,i_t,:])-np.mean(DSc[i_p1,i_p2,i_t-1,:])
+                    delta -= (rmean_DSC[i_t]-lmean_DSC[i_t-1])/(smooth_steps+1.)
+                    DSc[i_p1,i_p2,i_t,:] -= delta
+                    
+        #save the results
+        self._add_result(DSc,"DynSpec_connected")
+        
+    def halfSecSpec(self):
+        #load specifications
+        
+        #load and check data
+        DynSpec = self._load_base_file("DynSpec")
+        
+        #create containers
+        halfSecSpec = np.zeros((self.N_p,self.N_p,self.N_t,self.N_nu),dtype=float)
+        phase = np.zeros((self.N_p,self.N_p,self.N_t,self.N_nu),dtype=float)
+        DS = np.copy(DynSpec)
+        median_DS = np.zeros(DS.shape,dtype=float)
+        
+        #perform the computation
+        # - fill zero flags by median of nonzero values
+        DS[DS==0.] = np.nan
+        median_DS[:,:,:,:] = np.nanmedian(np.real(DS),axis=3)[:,:,:,na]
+        DS[np.isnan(DS)] = median_DS[np.isnan(DS)]
+        # or i_p1 in range(self.N_p):
+            # for i_p2 in range(self.N_p):
+                # for i_t in range(self.N_t):
+                    # #median_DS = np.nanmedian(DS[i_p1,i_p2,i_t,:])
+                    # #is_DS0 = np.argwhere(np.isnan(DS[i_p1,i_p2,i_t,:]))
+                    # for i_nu in range(self.N_nu):
+                        
+                    
+        # - compute the power spectrum along frequency
+        A_DynSpec = np.fft.fft(DS,axis=3)
+        A_DynSpec = np.fft.fftshift(A_DynSpec,axes=3)
+        halfSecSpec = np.abs(A_DynSpec)
+        phase = np.angle(A_DynSpec)
+        
+        #save the results
+        self._add_result(halfSecSpec,"halfSecSpec")
+        self._add_result(phase,"Fourier_phase")
+        
+    def SecSpec_divPulseVar(self):
+        #load and check data
+        DynSpec = self._load_base_file("DynSpec")
+        source = scinter_computation(self.dict_paths,"halfSecSpec")
+        hSS,hSS_phase = source.load_result(["halfSecSpec","Fourier_phase"])
+        source = scinter_computation(self.dict_paths,"secondary_spectrum")
+        f_t,f_nu = source.load_result(["doppler","delay"])
+        
+        #load specifications
+        smooth_dt = self._add_specification("smooth_dt",30.) #s
+        tau_0l = self._add_specification("tau_0l",4.0e-6) #s
+        tau_0u = self._add_specification("tau_0u",6.0e-6) #s
+        
+        #create containers
+        SecSpec_divPulseVar = np.zeros((self.N_p,self.N_p,self.N_t,self.N_nu),dtype=float)
+        DynSpec_divPulseVar = np.zeros((self.N_p,self.N_p,self.N_t,self.N_nu),dtype=float)
+        pulse_variation = np.zeros((self.N_p,self.N_p,self.N_t),dtype=float)
+        DS_smooth = np.empty((self.N_p,self.N_p,self.N_t,self.N_nu),dtype=float)
+        PV_smooth = np.empty_like(pulse_variation)
+        noise_threshold = np.empty((self.N_p,self.N_p,self.N_nu),dtype=float)
+        DS = np.abs(DynSpec)
+        
+        #perform the computation
+        f_nu /= 2.*math.pi
+        # - find range in tau used to extract the pulse variation by summing over it
+        for i_nu in range(self.N_nu):
+            if (tau_0l<f_nu[i_nu]<tau_0u): # or (-tau_0l>f_nu[i_nu]>-tau_0u)
+                #pulse_variation += np.real(hSS[:,:,:,i_nu]*np.exp(1.j*hSS_phase[:,:,:,i_nu]))
+                pulse_variation += hSS[:,:,:,i_nu]
+        # - create the smoothed dynamic spectrum
+        N_smooth = int(smooth_dt/self.delta_t)
+        DS_smooth = uniform_filter1d(DS, size=N_smooth, axis=2, mode='nearest')
+        PV_smooth = uniform_filter1d(pulse_variation, size=N_smooth, axis=2, mode='nearest')
+        # - fit pulse variation to points above median and subtract the result
+        noise_threshold = np.median(DS_smooth,axis=2)
+        for i_p1 in range(self.N_p):
+            for i_p2 in range(self.N_p):
+                for i_nu in range(self.N_nu):
+                    ar_i_t = []
+                    ar_DS = []
+                    for i_t in range(self.N_t):
+                        if DS_smooth[i_p1,i_p2,i_t,i_nu]>noise_threshold[i_p1,i_p2,i_nu]:
+                            ar_i_t.append(i_t)
+                            ar_DS.append(DS_smooth[i_p1,i_p2,i_t,i_nu])
+                    if not ar_DS == []:
+                        def fitfunc(in_x,in_a,in_b):
+                            N_x = len(in_x)
+                            result = np.empty(N_x,dtype=float)
+                            for i_x in range(N_x):
+                                result[i_x] = PV_smooth[i_p1,i_p2,int(in_x[i_x])]*in_a+in_b
+                            return result
+                        popt, pcov = curve_fit(fitfunc,ar_i_t,ar_DS)
+                        #DynSpec_divPulseVar[i_p1,i_p2,:,i_nu] = np.abs(DynSpec[i_p1,i_p2,:,i_nu])-(pulse_variation[i_p1,i_p2,:]*popt[0]+popt[1])
+                        DynSpec_divPulseVar[i_p1,i_p2,:,i_nu] = np.abs(DynSpec[i_p1,i_p2,:,i_nu])-(PV_smooth[i_p1,i_p2,:]*popt[0]+popt[1])
+        SecSpec_divPulseVar = np.fft.fft2(DynSpec_divPulseVar,axes=(2,3))
+        SecSpec_divPulseVar = np.abs(np.fft.fftshift(SecSpec_divPulseVar,axes=(2,3)))
+        
+        #check validity of results
+        assert np.std(pulse_variation)>0.
+        
+        #save the results
+        self._add_result(SecSpec_divPulseVar,"SecSpec_divPulseVar")
+        self._add_result(DynSpec_divPulseVar,"DynSpec_divPulseVar")
+        self._add_result(pulse_variation,"pulse_variation")
+        self._add_result(PV_smooth,"PV_smooth")
+        
+    def SecSpec_scale_cut(self):
+        #load and check data
+        DynSpec = self._load_base_file("DynSpec")
+        
+        #load specifications
+        smooth_dt = self._add_specification("smooth_dt",30.) #s
+        
+        #create containers
+        SecSpec_scale_cut = np.zeros((self.N_p,self.N_p,self.N_t,self.N_nu),dtype=float)
+        DynSpec_scale_cut = np.zeros((self.N_p,self.N_p,self.N_t,self.N_nu),dtype=float)
+        
+        #perform the computation
+        # - create the smoothed dynamic spectrum
+        N_smooth = int(smooth_dt/self.delta_t)
+        DS_smooth = uniform_filter1d(np.abs(DynSpec), size=N_smooth, axis=2, mode='nearest')
+        # - compute secondary spectrum from long range subtracted dynamic spectrum
+        DynSpec_scale_cut = np.abs(DynSpec) - DS_smooth
+        SecSpec_scale_cut = np.fft.fft2(DynSpec_scale_cut,axes=(2,3))
+        SecSpec_scale_cut = np.abs(np.fft.fftshift(SecSpec_scale_cut,axes=(2,3)))
+        # - rescale
+        #DynSpec_scale_cut = DynSpec_scale_cut[:,:,:,:]*np.mean(np.abs(DynSpec),axis=(2,3))[:,:,na,na]/np.mean(DynSpec_scale_cut,axis=(2,3))[:,:,na,na]
+        
+        #save the results
+        self._add_result(SecSpec_scale_cut,"SecSpec_scale_cut")
+        self._add_result(DynSpec_scale_cut,"DynSpec_scale_cut")
         
 ################### series of secondary spectra ###################
         
