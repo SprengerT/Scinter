@@ -7,12 +7,28 @@ from scinter.computation import computation as scinter_computation
 class defined_analyses:
     
     def dynamic_spectrum(self,dict_subplot,list_category,list_data):
+        #check which data to use
+        source_DynSpec = self._add_specification("source_DynSpec",[None,None,None],dict_subplot)
+    
         #load and check data
-        DynSpec = self._load_base_file("DynSpec")
-        
+        if source_DynSpec[0]==None:
+            DynSpec = self._load_base_file("DynSpec")
+        else:
+            source = scinter_computation(self.dict_paths,source_DynSpec[0])
+            DynSpec, = source.load_result([source_DynSpec[2]])
+        if source_DynSpec[0]=="FFT_phi_evolution":
+            source_nus = self._add_specification("source_nus",["FFT_phi_evolution",None,"nus"],dict_subplot)
+            source = scinter_computation(self.dict_paths,source_nus[0])
+            nus, = source.load_result([source_nus[2]])
+            source_midnus = scinter_computation(self.dict_paths,"FFT_phi_evolution")
+            midnus, = source_midnus.load_result(["midnus"])
+            i_slice = self._add_specification("i_slice",0,dict_subplot)
+            nu = nus[i_slice,:]
+        else:
+            nu = self.nu
+        t = self.t
+            
         #load specifications
-        tel1 = self._add_specification("telescope1",0,dict_subplot)
-        tel2 = self._add_specification("telescope2",0,dict_subplot)
         t_scale = self._add_specification("t_scale",60.,dict_subplot)
         nu_scale = self._add_specification("nu_scale",1.0e+06,dict_subplot)
         t_lcut = self._add_specification("t_lcut",float(self.t[0]/t_scale),dict_subplot)
@@ -20,14 +36,14 @@ class defined_analyses:
         nu_lcut = self._add_specification("nu_lcut",float(self.nu[0]/nu_scale),dict_subplot)
         nu_ucut = self._add_specification("nu_ucut",float(self.nu[-1]/nu_scale),dict_subplot)
         # - specifications for plotting
-        self._add_specification("title",r"Dynamic Spectrum",dict_subplot)
+        self._add_specification("title",r"Dynamic Spectrum (corrected)",dict_subplot)
         self._add_specification("xlabel",r"$t$ [min]",dict_subplot)
         self._add_specification("ylabel",r"$\nu$ [MHz]",dict_subplot)
         
         #refine data
         # - apply scale
-        t = self.t/t_scale
-        nu = self.nu/nu_scale
+        t = t/t_scale
+        nu = nu/nu_scale
         # - cut off out of range data
         min_index_t = 0
         max_index_t = len(t)-1
@@ -47,7 +63,13 @@ class defined_analyses:
                 max_index_nu = index_nu
                 break
         nu = nu[min_index_nu:max_index_nu+2]
-        DynSpec = np.real(DynSpec[tel1,tel2,min_index_t:max_index_t+2,min_index_nu:max_index_nu+2])
+        if source_DynSpec[0]=="FFT_phi_evolution":
+            print("Plotting dynamic spectrum for slice centered at {0}...".format(midnus[i_slice]))
+            DynSpec = DynSpec[i_slice,min_index_t:max_index_t+2,min_index_nu:max_index_nu+2]
+        else:
+            tel1 = self._add_specification("telescope1",0,dict_subplot)
+            tel2 = self._add_specification("telescope2",0,dict_subplot)
+            DynSpec = np.real(DynSpec[tel1,tel2,min_index_t:max_index_t+2,min_index_nu:max_index_nu+2])
         # - define data
         data = {'x':t,'y':nu,'f_xy':DynSpec}
         
@@ -120,6 +142,9 @@ class defined_analyses:
             SecSpec = SecSpec[0,min_index_t:max_index_t+2,min_index_nu:max_index_nu+2]
         elif source_SecSpec[0] in ["clean_SecSpec","LombScargle_SecSpec"]:
             SecSpec = np.abs(SecSpec[min_index_t:max_index_t+2,min_index_nu:max_index_nu+2])
+        elif source_SecSpec[0] in ["FFT_phi_evolution"]:
+            i_slice = self._add_specification("i_slice",0,dict_subplot)
+            SecSpec = SecSpec[i_slice,min_index_t:max_index_t+2,min_index_nu:max_index_nu+2]
         else:
             SecSpec = SecSpec[min_index_t:max_index_t+2,min_index_nu:max_index_nu+2]
         if not doppler_weight_reference==None:
@@ -356,59 +381,6 @@ class defined_analyses:
         
         #define list of data and the categories of plots
         list_category.append("curve")
-        list_data.append(data)
-        
-    def DynSpec_corr(self,dict_subplot,list_category,list_data):
-        #check which data to use
-        source_DynSpec = self._add_specification("source_DynSpec",["DynSpec_noPulseVar",None,"DynSpec_noPulseVar"],dict_subplot)
-    
-        #load and check data
-        source = scinter_computation(self.dict_paths,source_DynSpec[0])
-        DynSpec, = source.load_result([source_DynSpec[2]])
-        
-        #load specifications
-        tel1 = self._add_specification("telescope1",0,dict_subplot)
-        tel2 = self._add_specification("telescope2",0,dict_subplot)
-        t_scale = self._add_specification("t_scale",60.,dict_subplot)
-        nu_scale = self._add_specification("nu_scale",1.0e+06,dict_subplot)
-        t_lcut = self._add_specification("t_lcut",float(self.t[0]/t_scale),dict_subplot)
-        t_ucut = self._add_specification("t_ucut",float(self.t[-1]/t_scale),dict_subplot)
-        nu_lcut = self._add_specification("nu_lcut",float(self.nu[0]/nu_scale),dict_subplot)
-        nu_ucut = self._add_specification("nu_ucut",float(self.nu[-1]/nu_scale),dict_subplot)
-        # - specifications for plotting
-        self._add_specification("title",r"Dynamic Spectrum (corrected)",dict_subplot)
-        self._add_specification("xlabel",r"$t$ [min]",dict_subplot)
-        self._add_specification("ylabel",r"$\nu$ [MHz]",dict_subplot)
-        
-        #refine data
-        # - apply scale
-        t = self.t/t_scale
-        nu = self.nu/nu_scale
-        # - cut off out of range data
-        min_index_t = 0
-        max_index_t = len(t)-1
-        for index_t in range(len(t)):
-            if t[index_t]<t_lcut:
-                min_index_t = index_t
-            elif t[index_t]>t_ucut:
-                max_index_t = index_t
-                break
-        t = t[min_index_t:max_index_t+2]
-        min_index_nu = 0
-        max_index_nu = len(nu)-1
-        for index_nu in range(len(nu)):
-            if nu[index_nu]<nu_lcut:
-                min_index_nu = index_nu
-            elif nu[index_nu]>nu_ucut:
-                max_index_nu = index_nu
-                break
-        nu = nu[min_index_nu:max_index_nu+2]
-        DynSpec = np.real(DynSpec[tel1,tel2,min_index_t:max_index_t+2,min_index_nu:max_index_nu+2])
-        # - define data
-        data = {'x':t,'y':nu,'f_xy':DynSpec}
-        
-        #define list of data and the categories of plots
-        list_category.append("colormesh")
         list_data.append(data)
         
     def halfSecSpec(self,dict_subplot,list_category,list_data):

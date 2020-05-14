@@ -543,17 +543,19 @@ class defined_computations():
         #create containers
         #t0 = self.t[0]
         lnu = int(self.N_nu*nu_fraction)
-        nu_pos = np.linspace(0,lnu-1,num=N_slice,endpoint=True,dtype=int)
+        nu_pos = np.linspace(0,self.N_nu-lnu,num=N_slice,endpoint=True,dtype=int)
         nus = np.zeros(nu_pos.shape,dtype=float)
         midnus = np.zeros(nu_pos.shape,dtype=float)
         for i,index in enumerate(nu_pos):
             nus[i] = self.nu[index]
-            midnus[i] = self.nu[index+lnu/2]
+            midnus[i] = self.nu[index+int(lnu/2)]
         nuref = self.nu_half
         DSpec = np.zeros((N_slice,self.N_t,lnu),dtype=float)
+        v_nus = np.zeros((N_slice,lnu),dtype=float)
         for i_slice in range(N_slice):
             # - complex values are not supported by the C FT function
             DSpec[i_slice,:,:] = np.abs(DynSpec[pos1,pos2,:,nu_pos[i_slice]:lnu+nu_pos[i_slice]])
+            v_nus[i_slice,:] = self.nu[nu_pos[i_slice]:lnu+nu_pos[i_slice]]
         SSpec = np.zeros(DSpec.shape,dtype=np.complex)
         #f_t = np.linspace(-math.pi/self.delta_t,math.pi/self.delta_t,num=self.N_t,endpoint=False)
         #f_nu = np.linspace(-math.pi/self.delta_nu,math.pi/self.delta_nu,num=lnu,endpoint=False)
@@ -602,6 +604,7 @@ class defined_computations():
         
         #save the results
         self._add_result(DSpec,"DSpec")
+        self._add_result(v_nus,"nus")
         self._add_result(SSpec,"SSpec")
         self._add_result(phase,"phase")
         self._add_result(cphase,"cphase")
