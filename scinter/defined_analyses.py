@@ -36,7 +36,7 @@ class defined_analyses:
         nu_lcut = self._add_specification("nu_lcut",float(self.nu[0]/nu_scale),dict_subplot)
         nu_ucut = self._add_specification("nu_ucut",float(self.nu[-1]/nu_scale),dict_subplot)
         # - specifications for plotting
-        self._add_specification("title",r"Dynamic Spectrum (corrected)",dict_subplot)
+        self._add_specification("title",r"Dynamic Spectrum",dict_subplot)
         self._add_specification("xlabel",r"$t$ [min]",dict_subplot)
         self._add_specification("ylabel",r"$\nu$ [MHz]",dict_subplot)
         
@@ -470,6 +470,8 @@ class defined_analyses:
         veff = self._add_specification("veff",305000.,dict_subplot) #m/s
         theta_scale = self._add_specification("theta_scale",self.mas,dict_subplot) #radians
         flag_logarithmic = self._add_specification("flag_logarithmic",False,dict_subplot)
+        flag_mask = self._add_specification("flag_mask",False,dict_subplot)
+        flag_plot_lines = self._add_specification("flag_plot_lines",False,dict_subplot)
         # - specifications for plotting
         self._add_specification("title",r"$\theta$-$\theta$ diagram",dict_subplot)
         self._add_specification("xlabel",r"$\theta_1$ [mas]",dict_subplot)
@@ -481,7 +483,16 @@ class defined_analyses:
         # - apply scale and velocity translation
         theta1 = (-self.LightSpeed/self.nu_half/veff*thetas)/theta_scale
         theta2 = np.copy(theta1)
+        # - apply mask
+        if flag_mask:
+            source_mask = self._add_specification("source_mask",["thth_eigenvector",None,"weights"],dict_subplot)
+            source = scinter_computation(self.dict_paths,source_mask[0])
+            mask, = source.load_result([source_mask[2]])
+            thth *= mask
+        # - convert to log10 scale
         if flag_logarithmic:
+            # - flip negative values
+            thth = np.abs(thth)
             # - safely remove zeros if there are any
             min_nonzero = np.min(thth[np.nonzero(thth)])
             thth[thth == 0] = min_nonzero
@@ -489,10 +500,24 @@ class defined_analyses:
             thth = np.log10(thth)
         # - define data
         data = {'x':theta1,'y':theta2,'f_xy':thth}
+        # - overplot lines if requested
+        if flag_plot_lines:
+            source_lines = self._add_specification("source_lines","import_lines",dict_subplot)
+            source = scinter_computation(self.dict_paths,source_lines)
+            th1,th2 = source.load_result(["th1","th2"])
+            th1 *= -self.LightSpeed/self.nu_half/veff/theta_scale
+            th2 *= -self.LightSpeed/self.nu_half/veff/theta_scale
+            N_lines = len(th1)
+            line_data = {'N':N_lines}
+            for i_line in range(N_lines):
+                line_data.update({'x{0}'.format(i_line):th1[i_line,:],'y{0}'.format(i_line):th2[i_line,:]})
         
         #define list of data and the categories of plots
         list_category.append("colormesh")
         list_data.append(data)
+        if flag_plot_lines:
+            list_category.append("curve")
+            list_data.append(line_data)
         
     def FFT_thth(self,dict_subplot,list_category,list_data):
         #check which data to use
@@ -562,6 +587,8 @@ class defined_analyses:
         doppler = doppler/doppler_scale
         ddd = ddd*doppler_scale/delay_scale
         if flag_logarithmic:
+            # - flip negative values
+            linSS = np.abs(linSS)
             # - safely remove zeros if there are any
             min_nonzero = np.min(linSS[np.nonzero(linSS)])
             linSS[linSS == 0] = min_nonzero
@@ -616,7 +643,7 @@ class defined_analyses:
     def curvature_search(self,dict_subplot,list_category,list_data):
         #load and check data
         source = scinter_computation(self.dict_paths,"FFT_linSS_sum")
-        eta,eta_sum = source.load_result(["curv","curv_sum"])
+        eta,eta_sum,xdata,fit_result,fit_error = source.load_result(["curv","curv_sum","xdata","fit_result","fit_error"])
         
         #load specifications
         # - specifications for plotting
@@ -624,13 +651,107 @@ class defined_analyses:
         self._add_specification("xlabel",r"$\eta$ [s$^3$]",dict_subplot)
         self._add_specification("ylabel","weight [au]",dict_subplot)
         self._add_specification("curve_label0","weight",dict_subplot)
-        
-        print(eta[eta_sum==np.max(eta_sum[eta<0.9])])
+        self._add_specification("curve_label1","fit $\eta=${0}({1}) s$^3$".format(fit_result[0],fit_error[0]),dict_subplot)
         
         #refine data
+        # - define parabolic fit
+        ydata = fit_result[2]*(xdata-fit_result[0])**2+fit_result[1]
         # - define data
-        data = {'N':1,'x0':eta,'y0':eta_sum}
+        data = {'N':2,'x0':eta,'y0':eta_sum,'x1':xdata,'y1':ydata}
+        
         
         #define list of data and the categories of plots
         list_category.append("curve")
         list_data.append(data)
+        
+    def thth_eigenvector(self,dict_subplot,list_category,list_data):
+        #check which data to use
+        source_eigenvector = self._add_specification("source_eigenvector",["thth_eigenvector",None,"eigenvector"],dict_subplot)
+        source_thetas = self._add_specification("source_thetas",["thth_real",None,"thetas"],dict_subplot)
+    
+        #load and check data
+        source = scinter_computation(self.dict_paths,source_eigenvector[0])
+        eigenvector, = source.load_result([source_eigenvector[2]])
+        source = scinter_computation(self.dict_paths,source_thetas[0])
+        thetas, = source.load_result([source_thetas[2]])
+        
+        #load specifications
+        veff = self._add_specification("veff",305000.,dict_subplot) #m/s
+        theta_scale = self._add_specification("theta_scale",self.mas,dict_subplot) #radians
+        flag_logarithmic = self._add_specification("flag_logarithmic",False,dict_subplot)
+        # - specifications for plotting
+        self._add_specification("title",r"eigenvector $\mu(\theta)$ [log10]",dict_subplot)
+        self._add_specification("xlabel",r"$\theta$ [mas]",dict_subplot)
+        self._add_specification("ylabel",r"$\mu$",dict_subplot)
+        
+        #refine data
+        # - apply scale and velocity translation
+        thetas = (-self.LightSpeed/self.nu_half/veff*thetas)/theta_scale
+        if flag_logarithmic:
+            # - flip negative values
+            eigenvector = np.abs(eigenvector)
+            # - safely remove zeros if there are any
+            min_nonzero = np.min(eigenvector[np.nonzero(eigenvector)])
+            eigenvector[eigenvector == 0] = min_nonzero
+            # - apply logarithmic scale
+            eigenvector = np.log10(eigenvector)
+        # - define data
+        data = {'N':1,'x0':thetas,'y0':eigenvector}
+        
+        #define list of data and the categories of plots
+        list_category.append("curve")
+        list_data.append(data)
+        
+    def discrete_screen(self,dict_subplot,list_category,list_data):
+        #check which data to use
+        source_screen = self._add_specification("source_screen",["render_screen",None,"screen"],dict_subplot)
+        
+        #load and check data
+        source = scinter_computation(self.dict_paths,source_screen[0])
+        screen, = source.load_result([source_screen[2]])
+        
+        #load specifications
+        veff = self._add_specification("veff",305000.,dict_subplot) #m/s
+        theta_scale = self._add_specification("theta_scale",self.mas,dict_subplot) #radians
+        flag_logarithmic = self._add_specification("flag_logarithmic",False,dict_subplot)
+        flag_show_veff = self._add_specification("flag_show_veff",False,dict_subplot)
+        # - specifications for plotting
+        self._add_specification("title",r"screen",dict_subplot)
+        self._add_specification("xlabel",r"$\theta_\parallel$ [mas]",dict_subplot)
+        self._add_specification("ylabel",r"$\theta_\perp$ [mas]",dict_subplot)
+        
+        #refine data
+        theta_par = screen[:,0]
+        theta_perp = screen[:,1]
+        mu = screen[:,2]
+        # - apply scale and velocity translation
+        theta_par = (-self.LightSpeed/self.nu_half/veff*theta_par)/theta_scale
+        theta_perp = (-self.LightSpeed/self.nu_half/veff*theta_perp)/theta_scale
+        if flag_logarithmic:
+            # - flip negative values
+            mu = np.abs(mu)
+            # - safely remove zeros if there are any
+            min_nonzero = np.min(mu[np.nonzero(mu)])
+            mu[mu == 0] = min_nonzero
+            # - apply logarithmic scale
+            mu = np.log10(mu)
+        if flag_show_veff:
+            beta = self._add_specification("beta",-28.6,dict_subplot) #degrees
+            if -90.<beta<90.:
+                x_veff = np.array([0.,np.max(theta_par)])
+                y_veff = np.array([0.,np.max(theta_par)*np.tan(np.deg2rad(beta))])
+            else:
+                x_veff = np.array([0.,np.min(theta_par)])
+                y_veff = np.array([0.,np.min(theta_par)*np.tan(np.deg2rad(beta))])
+        # - define data
+        data = {'x':theta_par,'y':theta_perp,'f_xy':mu}
+        if flag_show_veff:
+            data_veff = {'N':1,'x0':x_veff,'y0':y_veff}
+        
+        #define list of data and the categories of plots
+        list_category.append("scatter")
+        list_data.append(data)
+        if flag_show_veff:
+            list_category.append("curve")
+            list_data.append(data_veff)
+        

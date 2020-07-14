@@ -120,7 +120,10 @@ class Scintillation(defined_analyses):
         self.bandwidth = dict_params["bandwidth"]
         self.timespan = dict_params["timespan"]
         # - set up coordinate vectors
-        self.t = np.linspace(0.,self.timespan,num=self.N_t,endpoint=True)
+        if dict_params["flag_load_t_explicit"]:
+            self.t = np.array(dict_params["t"])
+        else:
+            self.t = np.linspace(0.,self.timespan,num=self.N_t,endpoint=True)
         self.nu = np.linspace(self.nu_min,self.nu_min+self.bandwidth,num=self.N_nu,endpoint=True)
         # - deduce useful quantities
         self.t_half = self.t[int(self.N_t/2)]
@@ -168,7 +171,7 @@ class Scintillation(defined_analyses):
             path_load = os.path.join(path_computation,name_load)
             print("Loading previous results from {0}".format(path_load))
             if not os.path.exists(path_load):
-                warnings.warn("{0} does not exist! Cannot load archived results.")
+                self._warning("{0} does not exist! Cannot load archived results.".format(path_load))
                 return 0
             list_objects = os.listdir(path_load)
             for obj in list_objects:

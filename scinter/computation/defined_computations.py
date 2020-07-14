@@ -2,6 +2,7 @@ import numpy as np
 from numpy import newaxis as na
 from numpy.ctypeslib import ndpointer
 import scipy
+from scipy import interpolate
 from scipy.ndimage.filters import uniform_filter1d
 from scipy.optimize import curve_fit
 import math
@@ -15,6 +16,13 @@ import skimage.morphology as morphology
 from .result_source import result_source as scinter_computation
 
 class defined_computations():
+    #Useful constants
+    ly =  9460730472580800. #m
+    au =      149597870700. #m
+    pc = 648000./math.pi*au #m
+    LightSpeed = 299792458. #m/s
+    r_terra = 6371.*1000. #m
+    mas = 1./1000.*math.pi/648000. #radians
     
 ################### secondary spectrum ###################
         
@@ -54,6 +62,77 @@ class defined_computations():
         self._add_result(SecSpec,"secondary_spectrum")
         self._add_result(SecCrossSpec,"secondary_cross_spectrum")
         self._add_result(phase,"Fourier_phase")
+        self._add_result(f_t,"doppler")
+        self._add_result(f_nu,"delay")
+        
+    def SecSpec_slow_t(self):
+        #load specifications
+        DS_source = self._add_specification("DS_source",None)
+        delay_max = self._add_specification("delay_max",6.0)
+        tel1 = self._add_specification("tel1",0)
+        tel2 = self._add_specification("tel2",0)
+        N_t = self._add_specification("N_t",100)
+        doppler_max = self._add_specification("doppler_max",10.0)
+        #apply scales
+        doppler_max *= 2.*math.pi*1.0e-03
+        delay_max *= 2.*math.pi*1.0e-06
+        
+        #load and check data
+        if DS_source==None:
+            DynSpec = self._load_base_file("DynSpec")
+        else:
+            self._warning("Using {0} instead of unprocessed dynamic spectrum.".format(DS_source))
+            source = scinter_computation(self.dict_paths,DS_source[0])
+            DynSpec, = source.load_result([DS_source[2]])
+        DynSpec = DynSpec[tel1,tel2,:,:]
+            
+        #create containers
+        #SecSpec = np.zeros((N_t,self.N_nu),dtype=float)
+        f_t = np.linspace(-doppler_max,doppler_max,num=N_t,endpoint=True)
+        f_nu = np.linspace(-math.pi/self.delta_nu,math.pi/self.delta_nu,num=self.N_nu,endpoint=False)
+        
+        #perform the computation
+        #FFT over nu
+        A_DynSpec = np.fft.fft(DynSpec,axis=1)
+        A_DynSpec = np.fft.fftshift(A_DynSpec,axes=1)
+        #cut discarded delays
+        min_index_nu = 0
+        max_index_nu = len(f_nu)-1
+        for index_nu in range(len(f_nu)):
+            if f_nu[index_nu]<0.:
+                min_index_nu = index_nu
+            elif f_nu[index_nu]>delay_max:
+                max_index_nu = index_nu
+                break
+        f_nu = f_nu[min_index_nu:max_index_nu+2]
+        A_DynSpec = A_DynSpec[:,min_index_nu:max_index_nu+2]
+        N_nu = len(f_nu)
+        #SFT over t
+        A_SecSpec = np.zeros((N_t,N_nu),dtype=complex)
+        # #test dimensions
+        # print(N_nu,2*N_nu,2*N_nu-1)
+        # SecSpec = np.zeros((N_t,2*N_nu-1),dtype=float)
+        # print(SecSpec[:,N_nu-1:2*N_nu].shape,A_SecSpec.shape)
+        # SecSpec[:,N_nu-1:2*N_nu] = np.abs(A_SecSpec[:,:])
+        # SecSpec[:,N_nu-1::-1] = np.abs(A_SecSpec[:,:])
+        bar = progressbar.ProgressBar(maxval=N_nu, widgets=[progressbar.Bar('=', '[', ']'), ' ', progressbar.Percentage()])
+        bar.start()
+        for i_nu in range(N_nu):
+            bar.update(i_nu)
+            for i_t in range(N_t):
+                A_SecSpec[i_t,i_nu] = np.sum( A_DynSpec[:,i_nu]*np.exp(-1.j*f_t[i_t]*self.t[:]) )
+        bar.finish()
+        #Use symmetrie for other halfSecSpec
+        SecSpec = np.zeros((N_t,2*N_nu-1),dtype=float)
+        SecSpec[:,N_nu-1:2*N_nu] = np.abs(A_SecSpec[:,:])
+        SecSpec[:,N_nu-1::-1] = np.abs(A_SecSpec[::-1,:])
+        hf_nu = np.copy(f_nu)
+        f_nu = np.empty(2*N_nu-1,dtype=float)
+        f_nu[N_nu-1:2*N_nu] = hf_nu[:]
+        f_nu[N_nu-1::-1] = -hf_nu[:]
+                
+        #save the results
+        self._add_result(SecSpec,"secondary_spectrum")
         self._add_result(f_t,"doppler")
         self._add_result(f_nu,"delay")
         
@@ -697,6 +776,7 @@ class defined_computations():
         eta = self._add_specification("curvature",0.580) #s^3
         pos1 = self._add_specification("telescope1",0)
         pos2 = self._add_specification("telescope2",0)
+        flag_rNoise = self._add_specification("flag_remove_noise",True)
         SSpec = SSpec[pos1,pos2,:,:]
         
         #create containers
@@ -730,6 +810,7 @@ class defined_computations():
             th1_2l = np.min([lthetas[i_th1]**2,rthetas[i_th1]**2])
             th1_2u = np.max([lthetas[i_th1]**2,rthetas[i_th1]**2])
             for i_th2 in range(N_thth):
+                #print(i_th1,i_th2)
                 th2_l = np.min([lthetas[i_th2],rthetas[i_th2]])
                 th2_u = np.max([lthetas[i_th2],rthetas[i_th2]])
                 th2_2l = np.min([lthetas[i_th2]**2,rthetas[i_th2]**2])
@@ -755,6 +836,8 @@ class defined_computations():
                                 thth[i_th1,i_th2] += SSpec[i_fd,i_tau]*area
                             else:
                                 thth[i_th1,i_th2] += noise
+                            if flag_rNoise:
+                               thth[i_th1,i_th2] -= noise*area
         bar.finish()
         
         #save the results
@@ -780,20 +863,137 @@ class defined_computations():
         self._add_result(FFT_thth,"FFT_thth")
         self._add_result(f_theta,"f_theta")
         
-    def linSS_real(self):
+    def thth_eigenvector(self):
         #load and check data
-        source = scinter_computation(self.dict_paths,"nut_SecSpec")
-        SSpec,f_t,f_nu = source.load_result(["secondary_spectrum","doppler","delay"])
-        # - sparate 2pi from the Fourier frequency
-        f_t /= 2.*math.pi
-        f_nu /= 2.*math.pi
+        source_thth = self._add_specification("source_thth",["thth_real",None,"thth"])
+        source_thetas = self._add_specification("source_thetas",["thth_real",None,"thetas"])
+        source = scinter_computation(self.dict_paths,source_thth[0])
+        thth, = source.load_result([source_thth[2]])
+        source = scinter_computation(self.dict_paths,source_thetas[0])
+        thetas, = source.load_result([source_thetas[2]])
+        # - derived quantities
+        N_th = len(thetas)
         
+        #load specifications
+        """
+        available techniques:
+            minimization
+        """
+        technique = self._add_specification("technique","minimization")
+        initial = self._add_specification("initial","random")
+        major_diag = self._add_specification("mask_major_diag",3.)
+        minor_diag = self._add_specification("mask_minor_diag",1.)
+        noise_onset = self._add_specification("mask_noise_onset",7.)
+        veff = self._add_specification("veff",305000.) #m/s
+        theta_scale = self._add_specification("theta_scale",self.mas) #radians
+        
+        #create containers
+        eigenvector = np.zeros(thetas.shape,dtype=float)
+        thth_model = np.zeros(thth.shape,dtype=float)
+        residuals = np.empty(thth.shape,dtype=float)
+        weights = np.ones(thth.shape,dtype=float)
+        v0 = np.zeros(thetas.shape,dtype=float)
+        
+        #preparations
+        # for reproducible results
+        np.random.seed (1234)
+        def  func_and_grad_for_min (vector, weights, thth):
+            """
+            Compute function and gradient.
+            Here we assume that the problem has been symmetrised.
+            """
+
+            # full residuals:
+            resid= vector[:,None]*vector[None,:]-thth
+
+            f= (weights*resid**2).sum ()
+
+            grad= 4* (weights*vector[None,:]*resid).sum (axis=1)
+            
+            return f,grad
+        def  hesse_for_min (vector, weights, thth):
+            """
+            Hessian. Not needed for all methods.
+            """
+            temp= 4*(weights*vector[None,:]**2).sum (axis=1)
+            hess= np.diag (temp) + 4*weights*(2*vector[:,None]*vector[None,:]-thth)
+            return hess
+        
+        #perform the computation
+        # - scale thetas to physical units
+        thetas = (-self.LightSpeed/self.nu_half/veff*thetas)/theta_scale
+        # - compute the mask
+        weights = (np.abs (thetas[:,na]-thetas[na,:])>major_diag)*(
+            np.abs (thetas[:,na]+thetas[na,:])>minor_diag)*(
+            (np.abs(thetas[:,na]+np.zeros(N_th)[na,:])<noise_onset) | (np.abs(np.zeros(N_th)[:,na]+thetas[na,:])<noise_onset))
+        # - set initial values
+        if initial=="random":
+            v0 = np.random.randn(N_th)
+        elif "median":
+            for i_th in range(N_th):
+               v0[i_th] = np.nanmedian(np.nanmedian(thth[:,i_th,na]/thth[:,:],axis=0))
+        # - compute the eigenvector
+        if technique=="minimization":
+            # - choose a method
+            """
+            available methods:
+                Nelder-Mead   very slow, no derivatives
+                Powell        no derivatives
+                CG            no Hessian
+                BFGS          no Hessian
+                Newton-CG
+                L-BFGS-B
+                TNC           no Hessian
+                COBYLA        no derivatives
+                SLSQP         no Hessian
+                trust-constr
+                dogleg
+                trust-ncg
+                trust-exact
+                trust-krylov
+            Not all can deal with bounds.
+            """
+            method = self._add_specification("method","tnc")
+            # - we need the matrices to be symmetric
+            if not (thth==thth.T).all():
+                self._warning("Making non-symmetric thth matrix symmetric by M=(M+M.T)/2.")
+                thth = .5*(thth+thth.T)
+            if not (weights==weights.T).all():
+                self._warning("Making non-symmetric weights matrix symmetric by M=(M+M.T)/2.")
+                weights = .5*(weights+weights.T)
+            # - brightness eigenvectors are positive
+            bounds= scipy.optimize.Bounds (0, np.inf)
+            # - perform the minimization
+            res = scipy.optimize.minimize(
+                func_and_grad_for_min, v0, args= (weights,thth),
+                method=method, jac=True, hess=hesse_for_min, bounds=bounds,
+                options=dict(disp=True) )
+            eigenvector = res.x
+            thth_model = eigenvector[:,na]*eigenvector[na,:]
+            residuals = thth-thth_model
+        
+        #save the results
+        self._add_result(eigenvector,"eigenvector")
+        self._add_result(thth_model,"thth_model")
+        self._add_result(residuals,"residuals")
+        self._add_result(weights,"weights")
+        
+    def linSS_real(self):
         #load specifications
         N_delay = self._add_specification("N_delay",1000)
         doppler_max = self._add_specification("doppler_max",60.0e-3) #Hz
         ddd_max = self._add_specification("delay_doppler_ratio_max",1./20.) #s^2
         pos1 = self._add_specification("telescope1",0)
         pos2 = self._add_specification("telescope2",0)
+        source_SecSpec = self._add_specification("source_SecSpec","nut_SecSpec")
+        flag_rNoise = self._add_specification("flag_remove_noise",True)
+    
+        #load and check data
+        source = scinter_computation(self.dict_paths,source_SecSpec)
+        SSpec,f_t,f_nu = source.load_result(["secondary_spectrum","doppler","delay"])
+        # - sparate 2pi from the Fourier frequency
+        f_t /= 2.*math.pi
+        f_nu /= 2.*math.pi
         
         #create containers
         # - cut doppler and secondary spectrum
@@ -838,6 +1038,8 @@ class defined_computations():
                             # - read in area weighted values
                             if not f_nu[i_tau]==0.:
                                 linSS[i_fd,i_ddd] += SSpec[i_fd,i_tau]*width
+                                if flag_rNoise:
+                                    linSS[i_fd,i_ddd] -= noise*width
                             else:
                                 linSS[i_fd,i_ddd] += noise
         bar.finish()
@@ -863,6 +1065,8 @@ class defined_computations():
         dop_max = self._add_specification("doppler_max",float(doppler[-1]))
         ddd_min = self._add_specification("d-d-ratio_min",float(ddd[0]))
         ddd_max = self._add_specification("d-d-ratio_max",float(ddd[-1]))
+        flag_from_log10 = self._add_specification("flag_from_log10",True)
+        log10_min = self._add_specification("log10_min",0.)
         
         #crop data
         dop_mask = np.where((doppler>dop_min) & (doppler<dop_max))[0]
@@ -872,6 +1076,14 @@ class defined_computations():
         ddd = ddd[ddd_mask]
         N_ddd = len(ddd)
         N_dop = len(doppler)
+        #apply log10 if requested
+        if flag_from_log10: 
+            linSS_log10 = np.log10(linSS)
+            linSS_log10[linSS==0.] = .5*log10_min
+            linSS_log10[linSS_log10<log10_min] = log10_min
+            linSS_log10 -= log10_min
+            linSS = linSS_log10
+            
         
         #create containers
         FFT_linSS = np.empty(linSS.shape,dtype=float)
@@ -910,6 +1122,8 @@ class defined_computations():
         f_dop_max = self._add_specification("f_dop_max",float(f_dop[-1]))
         f_ddd_max = self._add_specification("f_ddd_max",float(f_ddd[-1]))
         flag_logarithmic = self._add_specification("flag_logarithmic",True)
+        fit_curv_min = self._add_specification("fit_curv_min",0.)
+        fit_curv_max = self._add_specification("fit_curv_max",1.)
         
         #create containers
         # - cut one quarter of FFT of FFT of real quantity
@@ -960,6 +1174,9 @@ class defined_computations():
             FFT_linSS[FFT_linSS == 0] = min_nonzero
             # - apply logarithmic scale
             FFT_linSS = np.log10(FFT_linSS)
+        #compute the curvature mask for the fitting
+        curv_mask = np.where((curv>fit_curv_min) & (curv<fit_curv_max))[0]
+        xdata = curv[curv_mask]
         
         #perform the computation
         # - main computation
@@ -971,7 +1188,246 @@ class defined_computations():
                 i_ddd = int((v_dop/v_curv-f_ddd[0])/(f_ddd[-1]-f_ddd[0])*N_ddd-0.5)
                 curv_sum[i_curv] += FFT_linSS[i_dop,i_ddd]
         bar.finish()
+        # - fit peak
+        fit_result = None
+        fit_error = None
+        def parabola(data,x,y,curv):
+            #print(x,y,curv)
+            return curv*(data-x)**2+y
+        try:
+            ydata = curv_sum[curv_mask]
+            popt, pcov = curve_fit(parabola,xdata,ydata,p0=[xdata[0],ydata[0],(np.min(ydata)-np.max(ydata))/4./(xdata[-1]-xdata[0])**2],bounds=([np.min(xdata),np.min(ydata),-np.inf],[np.max(xdata),np.max(ydata),0.]))
+            perr = np.sqrt(np.diag(pcov))
+            fit_result = popt
+            fit_error = perr
+            print("Curvature fit peak: {0} +- {1}".format(fit_result[0],fit_error[0]))
+        except:
+            print("Curvature could not be estimated by fit!")
         
         #save the results
         self._add_result(curv,"curv")
         self._add_result(curv_sum,"curv_sum")
+        self._add_result(xdata,"xdata")
+        self._add_result(fit_result,"fit_result")
+        self._add_result(fit_error,"fit_error")
+        
+    def square_thth(self):
+        #load specifications
+        veff = self._add_specification("veff",305000.) #m/s
+        theta_scale = self._add_specification("theta_scale",self.mas) #radians
+        ext_source_lines = self._add_specification("external_source_lines","/mnt/c/Ubuntu/MPIfR/scint_thth/lines.npy") #find a way to create secs file even when throwing error
+    
+        #load and check data
+        source = scinter_computation(self.dict_paths,"thth_real")
+        thth,theta_data = source.load_result(["thth","thetas"])
+        lines = np.load(ext_source_lines)
+        # - derived quantities
+        N_th = len(theta_data)
+        N_lines = len(lines)
+        
+        #create containers
+        thth_square = np.zeros(thth.shape,dtype=float)
+        thetas = np.empty(N_lines,dtype=float)
+        gammas = np.empty(N_lines,dtype=float)
+        theta = np.empty(N_th,dtype=float)
+        gamma = np.empty(N_th,dtype=float)
+        
+        #preparations
+        # - scale thetas to physical units
+        theta = (-self.LightSpeed/self.nu_half/veff*theta_data)/theta_scale
+        
+        #perform the computation
+        # - get sorted arrays of images
+        for i_line in range(N_lines):
+            thetas[i_line] = lines[i_line,0]
+            gammas[i_line] = lines[i_line,1]
+            if gammas[i_line] < 0.:
+                thetas[i_line] *= -1.
+                gammas[i_line] *= -1.
+        indices = np.argsort(thetas)
+        thetas = thetas[indices]
+        gammas = gammas[indices]
+        # - interpolate gamma(theta)
+        ip = interpolate.interp1d(thetas,gammas,kind='cubic',fill_value=1.,bounds_error=False)
+        for i_th in range(N_th):
+            gamma[i_th] = ip(theta[i_th])
+        # - create thth coordinates
+        th1 = 0.5*((theta[:,na]**2-theta[na,:]**2)/(gamma[:,na]*theta[:,na]-gamma[na,:]*theta[na,:])+gamma[:,na]*theta[:,na]-gamma[na,:]*theta[na,:])
+        th2 = 0.5*((theta[:,na]**2-theta[na,:]**2)/(gamma[:,na]*theta[:,na]-gamma[na,:]*theta[na,:])-gamma[:,na]*theta[:,na]+gamma[na,:]*theta[na,:])
+        # - evaluate pixels in thth along these coordinates
+        minth = np.min(theta)
+        maxth = np.max(theta)
+        spanth = maxth-minth
+        min_nonzero = np.min(thth[np.nonzero(thth)])
+        for i_th1 in range(N_th):
+            for i_th2 in range(N_th):
+                try:
+                    i1 = N_th-int((th1[i_th1,i_th2]-minth)/spanth*N_th+0.5)
+                    i2 = N_th-int((th2[i_th1,i_th2]-minth)/spanth*N_th+0.5)
+                    thth_square[i_th1,i_th2] = thth[i1,i2]
+                except:
+                    thth_square[i_th1,i_th2] = min_nonzero
+        
+        #save the results
+        self._add_result(thth_square,"thth_square")
+        self._add_result(gamma,"gamma")
+        self._add_result(th1,"th1")
+        self._add_result(th2,"th2")
+        
+    def import_lines(self):
+        #load specifications
+        veff = self._add_specification("veff",305000.) #m/s
+        theta_scale = self._add_specification("theta_scale",self.mas) #radians
+        ext_source_lines = self._add_specification("external_source_lines","/mnt/c/Ubuntu/MPIfR/scint_thth/lines.npy") #find a way to create secs file even when throwing error
+        
+        #load and check data
+        lines = np.load(ext_source_lines)
+        source = scinter_computation(self.dict_paths,"thth_real")
+        theta, = source.load_result(["thetas"])
+        # - derived quantities
+        N_th = len(theta)
+        N_lines = len(lines)
+        thetas = lines[:,0]
+        gammas = lines[:,1]
+        
+        #create containers
+        th1 = np.empty((N_lines,N_th),dtype=float)
+        th2 = np.empty((N_lines,N_th),dtype=float)
+        
+        #preparations
+        # - rescale thetas to internal units
+        thetas /= -self.LightSpeed/self.nu_half/veff/theta_scale
+        
+        #perform the computation
+        th1 = 0.5*((theta[na,:]**2-thetas[:,na]**2)/(theta[na,:]-gammas[:,na]*thetas[:,na])+theta[na,:]-gammas[:,na]*thetas[:,na])
+        th2 = 0.5*((theta[na,:]**2-thetas[:,na]**2)/(theta[na,:]-gammas[:,na]*thetas[:,na])-theta[na,:]+gammas[:,na]*thetas[:,na])
+        
+        #save the results
+        self._add_result(thetas,"thetas")
+        self._add_result(gammas,"gammas")
+        self._add_result(th1,"th1")
+        self._add_result(th2,"th2")
+        
+    def desquare_thth(self):
+        #load specifications
+        veff = self._add_specification("veff",305000.) #m/s
+        theta_scale = self._add_specification("theta_scale",self.mas) #radians
+        range_of_mean = self._add_specification("range_of_mean",1)
+    
+        #load and check data
+        source = scinter_computation(self.dict_paths,"thth_real")
+        thetas, = source.load_result(["thetas"])
+        source = scinter_computation(self.dict_paths,"square_thth")
+        gamma,th1,th2 = source.load_result(["gamma","th1","th2"])
+        source = scinter_computation(self.dict_paths,"thth_eigenvector")
+        mu,weights = source.load_result(["eigenvector","weights"])
+        # - derived quantities
+        N_th = len(thetas)
+        
+        #create containers
+        thth_model = np.zeros((N_th,N_th),dtype=float)
+        
+        #preparations
+        # - scale thetas to physical units
+        thetas = (-self.LightSpeed/self.nu_half/veff*thetas)/theta_scale
+        
+        #perform the computation
+        # minth = np.min(thetas)
+        # maxth = np.max(thetas)
+        # spanth = maxth-minth
+        # index1 = np.full((N_th,N_th),np.nan,dtype=int)
+        # index2 = np.full((N_th,N_th),np.nan,dtype=int)
+        # for i_th1 in range(N_th):
+            # for i_th2 in range(N_th):
+                # try:
+                    # i1 = N_th-int((th1[i_th1,i_th2]-minth)/spanth*N_th+0.5)
+                    # i2 = N_th-int((th2[i_th1,i_th2]-minth)/spanth*N_th+0.5)
+                    # #thth_model[i1,i2] = mu[i_th1]*mu[i_th2]
+                    # result = mu[i_th1]*mu[i_th2]
+                    # previous = thth_model[i1,i2]
+                    # if result>previous:
+                        # thth_model[i1,i2] = result
+                        # index1[i1,i2] = i_th1
+                        # index2[i1,i2] = i_th2
+                # except:
+                    # pass
+        
+        #old solution producing gaps
+        # - translate the pixels back using the same transformation
+        minth = np.min(thetas)
+        maxth = np.max(thetas)
+        spanth = maxth-minth
+        for i_th1 in range(N_th):
+            for i_th2 in range(N_th):
+                try:
+                    i1 = N_th-int((th1[i_th1,i_th2]-minth)/spanth*N_th+0.5)
+                    i2 = N_th-int((th2[i_th1,i_th2]-minth)/spanth*N_th+0.5)
+                    #thth_model[i1,i2] = mu[i_th1]*mu[i_th2]
+                    result = mu[i_th1]*mu[i_th2]
+                    previous = thth_model[i1,i2]
+                    if result>previous:
+                        thth_model[i1,i2] = result
+                except:
+                    pass
+        # - fill in empty spaces by mean of surrounding pixels
+        thth_model[thth_model==0.] = np.nan
+        # replacement = np.nanmin(thth_model)
+        # for i_th1 in range(N_th):
+            # for i_th2 in range(N_th):
+                # if np.isnan(thth_model[i_th1,i_th2]):
+                    # #thth_model[i_th1,i_th2] = np.nanmean(thth_model[i_th1-range_of_mean:i_th1+range_of_mean+1,i_th2-range_of_mean:i_th2+range_of_mean+1])
+                    # thth_model[i_th1,i_th2] = replacement
+                    # print(i_th1,i_th2)
+                # else:
+                    # replacement = thth_model[i_th1,i_th2]
+        
+        #save the results
+        self._add_result(thth_model,"thth_model")
+        
+    def render_screen(self):
+        #load specifications
+        beta = self._add_specification("beta",-28.6) #degrees
+    
+        #load and check data
+        source = scinter_computation(self.dict_paths,"thth_real")
+        theta, = source.load_result(["thetas"])
+        source = scinter_computation(self.dict_paths,"square_thth")
+        gamma, = source.load_result(["gamma"])
+        source = scinter_computation(self.dict_paths,"thth_eigenvector")
+        mu, = source.load_result(["eigenvector"])
+        # - derived quantities
+        N_th = len(theta)
+        
+        #create containers
+        screen = np.empty((2*N_th,3),dtype=float)
+        
+        #preparations
+        
+        #perform the computation
+        for i_im in range(N_th):
+            #compute both possible alpha values and check if they are in range
+            if -1.<=gamma[i_im]*np.cos(np.deg2rad(beta))<=1.:
+                alpha1 = beta - np.rad2deg(np.arccos(gamma[i_im]*np.cos(np.deg2rad(beta))))
+                alpha2 = beta + np.rad2deg(np.arccos(gamma[i_im]*np.cos(np.deg2rad(beta))))
+                if alpha1 > 180.:
+                    alpha1 -= 360.
+                elif alpha1 <= 180.:
+                    alpha1 += 360.
+                if alpha2 > 180.:
+                    alpha2 -= 360.
+                elif alpha2 <= 180.:
+                    alpha2 += 360.
+                screen[i_im,0] = theta[i_im]*np.cos(np.deg2rad(alpha1))
+                screen[i_im,1] = theta[i_im]*np.sin(np.deg2rad(alpha1))
+                screen[N_th+i_im,0] = theta[i_im]*np.cos(np.deg2rad(alpha2))
+                screen[N_th+i_im,1] = theta[i_im]*np.sin(np.deg2rad(alpha2))
+            else:
+                screen[i_im,0] = np.nan
+                screen[i_im,1] = np.nan
+                screen[N_th+i_im,0] = np.nan
+                screen[N_th+i_im,1] = np.nan
+            screen[i_im,2] = mu[i_im]
+            screen[N_th+i_im,2] = mu[i_im]
+        
+        #save the results
+        self._add_result(screen,"screen")

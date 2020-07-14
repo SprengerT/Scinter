@@ -1,0 +1,23 @@
+width: 1600
+height: 600
+dpi: 100
+bottom: 0.1
+top: 0.9
+left: 0.125
+right: 0.95
+wspace: 0.2
+hspace: 0.1
+plot_thth_0:
+  flag_logarithmic: true
+  flag_mask: false
+  source_thetas: [thth_real, null, thetas]
+  source_thth: [thth_real, null, thth]
+  title: $\theta$-$\theta$ diagram
+plot_thth_1:
+  flag_logarithmic: true
+  flag_mask: false
+  source_thetas: [thth_real, null, thetas]
+  source_thth: [thth_eigenvector, null, thth_model]
+  title: model
+plots:
+- [thth, thth]

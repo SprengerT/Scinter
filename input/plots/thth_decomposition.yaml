@@ -1,0 +1,45 @@
+bottom: 0.1
+dpi: 100
+height: 1000
+hspace: 0.3
+labelsize: 16
+left: 0.125
+plot_thth_0_0:
+  flag_logarithmic: true
+  flag_mask: true
+  source_mask: [thth_eigenvector, null, weights]
+  source_thetas: [thth_real, null, thetas]
+  source_thth: [thth_real, null, thth]
+  title: $\theta$-$\theta$ diagram
+plot_thth_0_1:
+  flag_logarithmic: true
+  flag_mask: false
+  source_thetas: [thth_real, null, thetas]
+  source_thth: [thth_eigenvector, null, thth_model]
+  title: model
+plot_thth_1_1:
+  flag_logarithmic: true
+  flag_mask: false
+  source_thetas: [thth_real, null, thetas]
+  source_thth: [thth_eigenvector, null, residuals]
+  theta_scale: 4.84813681109536e-09
+  title: absolute residuals [log10]
+plot_thth_eigenvector_1_0:
+  curve_label0: brightness vector
+  flag_logarithmic: true
+  linestyle0: '-'
+  marker0: o
+  markersize0: 0
+  source_eigenvector: [thth_eigenvector, null, eigenvector]
+  source_thetas: [thth_real, null, thetas]
+  title: eigenvector $\mu(\theta)$ [log10]
+  xlabel: $\theta$ [mas]
+  ylabel: $\mu$
+plots:
+- [thth, thth]
+- [thth_eigenvector, thth]
+right: 0.95
+textsize: 14
+top: 0.95
+width: 1300
+wspace: 0.2

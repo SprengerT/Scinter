@@ -1,0 +1,38 @@
+bottom: 0.1
+dpi: 100
+height: 1000
+hspace: 0.3
+labelsize: 16
+left: 0.125
+plot_thth_0_0:
+  flag_logarithmic: true
+  flag_mask: false
+  source_thetas: [thth_real, null, thetas]
+  source_thth: [thth_real, null, thth]
+  title: $\theta$-$\theta$ diagram
+plot_thth_0_1:
+  flag_logarithmic: true
+  flag_mask: false
+  source_thetas: [thth_real, null, thetas]
+  source_thth: [desquare_thth, null, thth_model]
+  title: model
+plot_thth_1_0:
+  flag_logarithmic: true
+  flag_mask: false
+  source_thetas: [thth_real, null, thetas]
+  source_thth: [square_thth, null, thth_square]
+  title: squared diagram
+plot_thth_1_1:
+  flag_logarithmic: true
+  flag_mask: false
+  source_thetas: [thth_real, null, thetas]
+  source_thth: [thth_eigenvector, null, thth_model]
+  title: squared model
+plots:
+- [thth, thth]
+- [thth, thth]
+right: 0.95
+textsize: 14
+top: 0.95
+width: 1300
+wspace: 0.2

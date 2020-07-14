@@ -60,6 +60,7 @@ class plot(defined_plots):
         ax.set_title(self.dict_subplot['title'])
         ax.set_xlabel(self.dict_subplot['xlabel'])
         ax.set_ylabel(self.dict_subplot['ylabel'])
+        ax.set_aspect(self.dict_subplot['axis_aspect'])
         print("Successfully plotted {0}.".format(self.name_plot))
         
     def _add_specification(self,spec_name,spec_value):
