@@ -56,7 +56,9 @@ class defined_plots:
         #print(map(list, zip(*f_xy)))
         #im = ax.pcolormesh((x-offset_x),(y-offset_y),map(list, zip(*f_xy)),cmap=cmap,vmin=vmin,vmax=vmax)
         im = ax.pcolormesh((x-offset_x),(y-offset_y),np.swapaxes(f_xy,0,1),cmap=cmap,vmin=vmin,vmax=vmax)
-        figure.colorbar(im, ax=ax)
+        #test if plot is a zoom window and draw colorbar otherwise
+        if not str(type(ax))=="<class 'mpl_toolkits.axes_grid1.parasite_axes.AxesHostAxes'>":
+            figure.colorbar(im, ax=ax)
         
     def curve(self,data,figure,ax):
         #load data
@@ -139,10 +141,10 @@ class defined_plots:
         #load specifications
         linewidth = self._add_specification("linewidth",1)
         # - axis properties
-        self._add_specification("xmin",None)
-        self._add_specification("xmax",None)
-        self._add_specification("ymin",None)
-        self._add_specification("ymax",None)
+        self._add_specification("xmin",float(np.min(x)))
+        self._add_specification("xmax",float(np.max(x)))
+        self._add_specification("ymin",float(np.min(y)))
+        self._add_specification("ymax",float(np.max(y)))
         self._add_specification("title","f(x,y)")
         self._add_specification("xlabel","x")
         self._add_specification("ylabel","y")

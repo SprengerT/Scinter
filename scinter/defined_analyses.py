@@ -24,9 +24,24 @@ class defined_analyses:
             midnus, = source_midnus.load_result(["midnus"])
             i_slice = self._add_specification("i_slice",0,dict_subplot)
             nu = nus[i_slice,:]
+            t = self.t
+        elif source_DynSpec[0]=="DS_downsampled": #[DS_downsampled, null, new_DS]
+            source_t = self._add_specification("source_t",["DS_downsampled",None,"new_t"],dict_subplot)
+            source = scinter_computation(self.dict_paths,source_t[0])
+            t, = source.load_result([source_t[2]])
+            source_nu = self._add_specification("source_nu",["DS_downsampled",None,"new_nu"],dict_subplot)
+            source = scinter_computation(self.dict_paths,source_nu[0])
+            nu, = source.load_result([source_nu[2]])
+        elif source_DynSpec[0]=="Gini_deconvolution": #[Gini_deconvolution, null, DS_deconv]
+            source_t = self._add_specification("source_t",["Gini_deconvolution",None,"t"],dict_subplot)
+            source = scinter_computation(self.dict_paths,source_t[0])
+            t, = source.load_result([source_t[2]])
+            source_nu = self._add_specification("source_nu",["Gini_deconvolution",None,"nu"],dict_subplot)
+            source = scinter_computation(self.dict_paths,source_nu[0])
+            nu, = source.load_result([source_nu[2]])
         else:
             nu = self.nu
-        t = self.t
+            t = self.t
             
         #load specifications
         t_scale = self._add_specification("t_scale",60.,dict_subplot)
@@ -66,6 +81,10 @@ class defined_analyses:
         if source_DynSpec[0]=="FFT_phi_evolution":
             print("Plotting dynamic spectrum for slice centered at {0}...".format(midnus[i_slice]))
             DynSpec = DynSpec[i_slice,min_index_t:max_index_t+2,min_index_nu:max_index_nu+2]
+        elif source_DynSpec[0]=="Gini_deconvolution":
+            DynSpec = DynSpec[min_index_t:max_index_t+2,min_index_nu:max_index_nu+2]
+        elif source_DynSpec[0] in ["deconvolve_SecSpec","SecSpec_fit_stripes"]:
+            DynSpec = np.abs(DynSpec[min_index_t:max_index_t+2,min_index_nu:max_index_nu+2])
         else:
             tel1 = self._add_specification("telescope1",0,dict_subplot)
             tel2 = self._add_specification("telescope2",0,dict_subplot)
@@ -140,7 +159,10 @@ class defined_analyses:
             SecSpec = SecSpec[tel1,tel2,min_index_t:max_index_t+2,min_index_nu:max_index_nu+2]
         elif source_SecSpec[0]=="extracted_SSpec":
             SecSpec = SecSpec[0,min_index_t:max_index_t+2,min_index_nu:max_index_nu+2]
-        elif source_SecSpec[0] in ["clean_SecSpec","LombScargle_SecSpec"]:
+        elif source_SecSpec[0] in ["clean_SecSpec","LombScargle_SecSpec","deconvolve_SecSpec","SecSpec_fit_stripes","SecSpec_clean_deconvolution"]:
+            # print(SecSpec.shape,np.std(np.abs(SecSpec)))
+            # print(SecSpec)
+            # print(np.isnan(np.std(SecSpec)))
             SecSpec = np.abs(SecSpec[min_index_t:max_index_t+2,min_index_nu:max_index_nu+2])
         elif source_SecSpec[0] in ["FFT_phi_evolution"]:
             i_slice = self._add_specification("i_slice",0,dict_subplot)
@@ -738,11 +760,11 @@ class defined_analyses:
         if flag_show_veff:
             beta = self._add_specification("beta",-28.6,dict_subplot) #degrees
             if -90.<beta<90.:
-                x_veff = np.array([0.,np.max(theta_par)])
-                y_veff = np.array([0.,np.max(theta_par)*np.tan(np.deg2rad(beta))])
+                x_veff = np.array([0.,np.nanmax(theta_par)])
+                y_veff = np.array([0.,np.nanmax(theta_par)*np.tan(np.deg2rad(beta))])
             else:
-                x_veff = np.array([0.,np.min(theta_par)])
-                y_veff = np.array([0.,np.min(theta_par)*np.tan(np.deg2rad(beta))])
+                x_veff = np.array([0.,np.nanmin(theta_par)])
+                y_veff = np.array([0.,np.nanmin(theta_par)*np.tan(np.deg2rad(beta))])
         # - define data
         data = {'x':theta_par,'y':theta_perp,'f_xy':mu}
         if flag_show_veff:
@@ -754,4 +776,101 @@ class defined_analyses:
         if flag_show_veff:
             list_category.append("curve")
             list_data.append(data_veff)
+            
+    def thfD(self,dict_subplot,list_category,list_data):
+        #check which data to use
+        source_thfD = self._add_specification("source_thfD",["thfD_diagram",None,"thfD"],dict_subplot)
+        source_thetas = self._add_specification("source_thetas",["thfD_diagram",None,"thetas"],dict_subplot)
+        source_fDs = self._add_specification("source_fDs",["thfD_diagram",None,"fDs"],dict_subplot)
+        
+        #load and check data
+        source = scinter_computation(self.dict_paths,source_thfD[0])
+        thfD, = source.load_result([source_thfD[2]])
+        source = scinter_computation(self.dict_paths,source_thetas[0])
+        thetas, = source.load_result([source_thetas[2]])
+        source = scinter_computation(self.dict_paths,source_fDs[0])
+        fDs, = source.load_result([source_fDs[2]])
+        
+        #load specifications
+        flag_logarithmic = self._add_specification("flag_logarithmic",True,dict_subplot)
+        theta_scale = self._add_specification("theta_scale",self.mas,dict_subplot) #radians
+        doppler_scale = self._add_specification("doppler_scale",1.0e-03,dict_subplot)
+        # - specifications for plotting
+        self._add_specification("title",r"$\theta$-$f_\mathrm{D}$ diagram",dict_subplot)
+        self._add_specification("xlabel",r"$\theta$ [mas]",dict_subplot)
+        self._add_specification("ylabel",r"$f_\mathrm{D}$ [mHz]",dict_subplot)
+        
+        #refine data
+        # - apply scale
+        thetas /= theta_scale
+        fDs /= doppler_scale*2.*np.pi
+        # - convert to log10 scale
+        if flag_logarithmic:
+            # - flip negative values
+            thfD = np.abs(thfD)
+            # - safely remove zeros if there are any
+            min_nonzero = np.min(thfD[np.nonzero(thfD)])
+            thfD[thfD == 0] = min_nonzero
+            # - apply logarithmic scale
+            thfD = np.log10(thfD)
+        # - define data
+        data = {'x':thetas,'y':fDs,'f_xy':thfD}
+        
+        #define list of data and the categories of plots
+        list_category.append("colormesh")
+        list_data.append(data)
+        
+    def thfD_line(self,dict_subplot,list_category,list_data):
+        #load and check data
+        thetas = self._load_add_specification("source_thetas",["thfD_diagram",None,"thetas"],dict_subplot)
+        profile = self._load_add_specification("source_profile",["thfD_line",None,"profile"],dict_subplot)
+        line = self._load_add_specification("source_line",["thfD_line",None,"line"],dict_subplot)
+        
+        #load specifications
+        flag_logarithmic = self._add_specification("flag_logarithmic",True,dict_subplot)
+        theta_scale = self._add_specification("theta_scale",self.mas,dict_subplot) #radians
+        # - specifications for plotting
+        self._add_specification("title",r"Image Distribution",dict_subplot)
+        self._add_specification("xlabel",r"$\theta$ [mas]",dict_subplot)
+        self._add_specification("ylabel",r"power [au]",dict_subplot)
+        
+        #refine data
+        # - apply scale
+        thetas /= theta_scale
+        # - convert to log10 scale
+        if flag_logarithmic:
+            line = self._log10_safe(line)
+        # - define data
+        data = {'N':1,'x0':thetas,'y0':line}
+        
+        #define list of data and the categories of plots
+        list_category.append("curve")
+        list_data.append(data)
+        
+    def thfD_profile(self,dict_subplot,list_category,list_data):
+        #load and check data
+        fDs = self._load_add_specification("source_thetas",["thfD_diagram",None,"fDs"],dict_subplot)
+        profile = self._load_add_specification("source_profile",["thfD_line",None,"profile"],dict_subplot)
+        line = self._load_add_specification("source_line",["thfD_line",None,"line"],dict_subplot)
+        
+        #load specifications
+        flag_logarithmic = self._add_specification("flag_logarithmic",False,dict_subplot)
+        doppler_scale = self._add_specification("doppler_scale",1.0e-03,dict_subplot)
+        # - specifications for plotting
+        self._add_specification("title",r"doppler profile",dict_subplot)
+        self._add_specification("xlabel",r"$f_\mathrm{D}$ [mas]",dict_subplot)
+        self._add_specification("ylabel",r"power [au]",dict_subplot)
+        
+        #refine data
+        # - apply scale
+        fDs /= doppler_scale*2.*np.pi
+        # - convert to log10 scale
+        if flag_logarithmic:
+            profile = self._log10_safe(profile)
+        # - define data
+        data = {'N':1,'x0':fDs,'y0':profile}
+        
+        #define list of data and the categories of plots
+        list_category.append("curve")
+        list_data.append(data)
         

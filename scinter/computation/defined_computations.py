@@ -11,7 +11,10 @@ import ctypes
 import cv2
 import skimage
 import skimage.morphology as morphology
-#from astropy.timeseries import LombScargle #does not work for python 2 !
+import time
+import skimage
+from skimage.measure import block_reduce
+from astropy.timeseries import LombScargle #does not work for python 2 !
 
 from .result_source import result_source as scinter_computation
 
@@ -23,6 +26,62 @@ class defined_computations():
     LightSpeed = 299792458. #m/s
     r_terra = 6371.*1000. #m
     mas = 1./1000.*math.pi/648000. #radians
+    
+################### internal ###################
+
+    def _find_nearest(self,array,value):
+        array = np.asarray(array)
+        idx = (np.abs(array - value)).argmin()
+        return idx
+    
+################### dynamic spectrum ###################
+
+    def DS_downsampled(self):
+        #load specifications
+        DS_source = self._add_specification("DS_source",None)
+        new_N_t = self._add_specification("new_N_t",100)
+        new_N_nu = self._add_specification("new_N_nu",100)
+        
+        #load and check data
+        if DS_source==None:
+            DynSpec = self._load_base_file("DynSpec")
+        else:
+            self._warning("Using {0} instead of unprocessed dynamic spectrum.".format(DS_source))
+            source = scinter_computation(self.dict_paths,DS_source[0])
+            DynSpec, = source.load_result([DS_source[2]])
+            
+        #preparations
+        DynSpec = np.abs(DynSpec)
+        new_t = np.linspace(self.t[0],self.t[-1],num=new_N_t,endpoint=True)
+        new_nu = np.linspace(self.nu[0],self.nu[-1],num=new_N_nu,endpoint=True)
+        new_dt = new_t[1]-new_t[0]
+        new_dnu = new_nu[1]-new_nu[0]
+        
+        #create containers
+        new_DS = np.zeros((self.N_p,self.N_p,new_N_t,new_N_nu),dtype=float)
+        
+        #perform the computation
+        for i_p1 in range(self.N_p):
+            for i_p2 in range(self.N_p):
+                for i_t in range(new_N_t):
+                    # - compute indices in range
+                    i_t_l = np.argmax(self.t>new_t[i_t]-new_dt/2.)
+                    i_t_u = np.argmax(self.t>new_t[i_t]+new_dt/2.)
+                    for i_nu in range(new_N_nu):
+                        i_nu_l = np.argmax(self.nu>new_nu[i_nu]-new_dnu/2.)
+                        i_nu_u = np.argmax(self.nu>new_nu[i_nu]+new_dnu/2.)
+                        sample = DynSpec[i_p1,i_p2,i_t_l:i_t_u,i_nu_l:i_nu_u]
+                        good_ones = []
+                        for entry in sample.flatten():
+                            if entry>0.:
+                                good_ones.append(entry)
+                        if not len(good_ones)==0:
+                            new_DS[i_p1,i_p2,i_t,i_nu] = np.mean(good_ones)
+                         
+        #save the results
+        self._add_result(new_DS,"new_DS")
+        self._add_result(new_t,"new_t")
+        self._add_result(new_nu,"new_nu")
     
 ################### secondary spectrum ###################
         
@@ -122,7 +181,7 @@ class defined_computations():
             for i_t in range(N_t):
                 A_SecSpec[i_t,i_nu] = np.sum( A_DynSpec[:,i_nu]*np.exp(-1.j*f_t[i_t]*self.t[:]) )
         bar.finish()
-        #Use symmetrie for other halfSecSpec
+        #Use symmetry for other halfSecSpec
         SecSpec = np.zeros((N_t,2*N_nu-1),dtype=float)
         SecSpec[:,N_nu-1:2*N_nu] = np.abs(A_SecSpec[:,:])
         SecSpec[:,N_nu-1::-1] = np.abs(A_SecSpec[::-1,:])
@@ -292,7 +351,8 @@ class defined_computations():
         
         LS_SSpec = np.zeros((self.N_t,self.N_nu),dtype=complex)
         t = np.delete(self.t,flags)
-        DSpec = np.delete(DSpec,flags,axis=0)
+        DSpec = np.real(np.delete(DSpec,flags,axis=0))
+        DSpec -= np.median(DSpec)
         
         #perform the computation
         amplitude = np.zeros(f_t.shape,dtype = float)
@@ -302,17 +362,53 @@ class defined_computations():
         bar.start()
         for i_nu in range(self.N_nu):
             bar.update(i_nu)
-            LS = LombScargle(t, DSpec[:,i_nu])
-            amplitude[int(self.N_t/2):] = np.sqrt(LS.power(posf_t,method='cython'))
-            amplitude[1:int(self.N_t/2)] = amplitude[2*int(self.N_t/2)+1:int(self.N_t/2):-1]
-            for i_t in range(int(self.N_t/2)+1,self.N_t):
-                angle[i_t] = np.angle(LS.model_parameters(f_t[i_t])[2]+1.0j*LS.model_parameters(f_t[i_t])[1])
-            angle[1:int(self.N_t/2)] = -angle[2*int(self.N_t/2)+1:int(self.N_t/2):-1]
-            LS_SSpec[:,i_nu] = amplitude*np.exp(1.0j*angle)
+            if not (np.std(DSpec[:,i_nu])==0. or np.isnan(np.std(DSpec[:,i_nu])).any()):
+                LS = LombScargle(t, DSpec[:,i_nu])
+                # if i_nu==0:
+                    # print("LS: type={0}".format(type(LS)))
+                if self.N_t % 2 != 0:
+                    is1_t = int(self.N_t/2)+1
+                    is2_t = int(self.N_t/2)
+                else:
+                    is1_t = int(self.N_t/2)
+                    is2_t = int(self.N_t/2)
+                # if i_nu==0:
+                    # print("N_t={0}, is1_t={1}, is2_t={2}".format(self.N_t,is1_t,is2_t))
+                amplitude[is2_t:] = np.sqrt(LS.power(posf_t,method='cython'))
+                amplitude[1:is1_t] = amplitude[self.N_t+1:is2_t:-1]
+                # if i_nu==0:
+                    # print("amplitude: type={0}, shape={1}, std={2}, dtype={3}".format(type(amplitude),amplitude.shape,np.std(amplitude),amplitude.dtype))
+                if np.isnan(np.std(amplitude)):
+                    print("{0}: amplitude contains nan".format(i_nu))
+                    print("DSpec.std={0}".format(np.std(DSpec[:,i_nu])))
+                    for i,v in enumerate(amplitude):
+                        if np.isnan(v):
+                            print("at {0}".format(i))
+                for i_t in range(int(self.N_t/2)+1,self.N_t):
+                    angle[i_t] = np.angle(LS.model_parameters(f_t[i_t])[2]+1.0j*LS.model_parameters(f_t[i_t])[1])
+                angle[1:is1_t] = -angle[self.N_t+1:is2_t:-1]
+                # if i_nu==0:
+                    # print("angle: type={0}, shape={1}, std={2}, dtype={3}".format(type(angle),angle.shape,np.std(angle),angle.dtype))
+                # if np.isnan(np.std(angle)):
+                    # print("{0}: angle contains nan".format(i_nu))
+                    # for i,v in enumerate(angle):
+                        # if np.isnan(v):
+                            # print("at {0}".format(i))
+                LS_SSpec[:,i_nu] = amplitude*np.exp(1.0j*angle)
+                # if i_nu==0:
+                    # print("LS_SSpec: type={0}, shape={1}, std={2}, dtype={3}".format(type(LS_SSpec),LS_SSpec.shape,np.std(LS_SSpec),LS_SSpec.dtype))
+                # if np.isnan(np.std(LS_SSpec[:,i_nu])):
+                    # print("{0}: LS_SSpec contains nan".format(i_nu))
+                    # for i,v in enumerate(LS_SSpec[:,i_nu]):
+                        # if np.isnan(v):
+                            # print("at {0}".format(i))
         bar.finish()
         # - perform FFT along remaining axis
         LS_SSpec = np.fft.fft(LS_SSpec, axis=1)
         LS_SSpec = np.fft.fftshift(LS_SSpec, axes=1)
+        LS_SSpec = LS_SSpec[::-1,:]
+        LS_SSpec = np.roll(LS_SSpec,1,axis=0)
+        print("LS_SSpec: type={0}, shape={1}, std={2}, dtype={3}".format(type(LS_SSpec),LS_SSpec.shape,np.std(LS_SSpec),LS_SSpec.dtype))
         
         #save the results
         self._add_result(LS_SSpec,"LombScargle_SecSpec")
@@ -587,6 +683,472 @@ class defined_computations():
         #save the results
         self._add_result(SecSpec_scale_cut,"SecSpec_scale_cut")
         self._add_result(DynSpec_scale_cut,"DynSpec_scale_cut")
+        
+    def deconvolve_SecSpec_1pix(self):
+        #load and check data
+        DynSpec = self._load_base_file("DynSpec")
+        source = scinter_computation(self.dict_paths,"secondary_spectrum")
+        SecSpec,f_t,f_nu,SSphase = source.load_result(["secondary_spectrum","doppler","delay","Fourier_phase"])
+        
+        #load specifications
+        pos1 = self._add_specification("telescope1",0)
+        pos2 = self._add_specification("telescope2",0)
+        fD_min = self._add_specification("fD_min",-10.0e-3)
+        fD_max = self._add_specification("fD_max",-0.5e-3)
+        tau = self._add_specification("tau",0.7e-6)
+        fD = self._add_specification("fD",float(np.sqrt(tau/0.08825745414070099)*np.sign(fD_min)))
+        
+        #preparation
+        # - take single dish for simplicity
+        DynSpec = DynSpec[pos1,pos2,:,:]
+        SecSpec = SecSpec[pos1,pos2,:,:]*np.exp(1.0j*SSphase[pos1,pos2,:,:])
+        # - sparate 2pi from the Fourier frequency
+        f_t /= 2.*math.pi
+        f_nu /= 2.*math.pi
+        # - get indices
+        #dft = f_t[1]-f_t[0]
+        #dfnu = f_nu[1]-f_nu[0]
+        idx_tau = self._find_nearest(f_nu,tau)
+        idx_fD = self._find_nearest(f_t,fD)
+        idx_fD0 = self._find_nearest(f_t,0.)
+        idx_tau0 = self._find_nearest(f_nu,0.)
+        idx_fD_max = self._find_nearest(f_t,fD_max)
+        idx_fD_min = self._find_nearest(f_t,fD_min)
+        
+        #create containers
+        kernel = np.empty_like(DynSpec)
+        DynSpec_deconv = np.empty_like(DynSpec)
+        SecSpec_deconv = np.empty_like(SecSpec)
+        
+        #perform the computation
+        # - get area to deconvolve into point
+        Fkernel = np.zeros_like(SecSpec)
+        Fkernel[idx_fD_min+idx_fD0-idx_fD:idx_fD_max+idx_fD0-idx_fD+1,idx_tau0] = SecSpec[idx_fD_min:idx_fD_max+1,idx_tau]
+        #print([i for i in range(idx_fD_min,idx_fD_max+1)])
+        #print([i for i in range(idx_fD_min+idx_fD0-idx_fD,idx_fD_max+idx_fD0-idx_fD+1)])
+        #print(idx_fD_min,idx_fD,idx_fD_max,idx_fD0)
+        kernel = np.fft.ifft2(np.fft.ifftshift(Fkernel,axes=(0,1)))
+        kernel /= np.mean(np.abs(kernel))
+        #print(np.std(Fkernel),np.std(kernel))
+        DynSpec_deconv = DynSpec/kernel
+        SecSpec_deconv = np.fft.fftshift(np.fft.fft2(DynSpec_deconv),axes=(0,1))
+        
+        #save the results
+        self._add_result(kernel,"kernel")
+        self._add_result(DynSpec_deconv,"DynSpec_deconv")
+        self._add_result(SecSpec_deconv,"SecSpec_deconv")
+        
+    def deconvolve_SecSpec(self):
+        #load and check data
+        DynSpec = self._load_base_file("DynSpec")
+        source = scinter_computation(self.dict_paths,"secondary_spectrum")
+        SecSpec,f_t,f_nu,SSphase = source.load_result(["secondary_spectrum","doppler","delay","Fourier_phase"])
+        
+        #load specifications
+        pos1 = self._add_specification("telescope1",0)
+        pos2 = self._add_specification("telescope2",0)
+        fD_min = self._add_specification("fD_min",0.5e-3)
+        tau_min = self._add_specification("tau_min",0.3e-6)
+        tau_max = self._add_specification("tau_max",4.0e-6)
+        eta = self._add_specification("curvature",0.08825745414070099)
+        #fD = self._add_specification("fD",float(np.sqrt(tau/0.08825745414070099)*np.sign(fD_min)))
+        
+        #preparation
+        # - take single dish for simplicity
+        DynSpec = DynSpec[pos1,pos2,:,:]
+        SecSpec = SecSpec[pos1,pos2,:,:]*np.exp(1.0j*SSphase[pos1,pos2,:,:])
+        # - sparate 2pi from the Fourier frequency
+        f_t /= 2.*math.pi
+        f_nu /= 2.*math.pi
+        # - get indices
+        #dft = f_t[1]-f_t[0]
+        #dfnu = f_nu[1]-f_nu[0]
+        idx_tau_min = self._find_nearest(f_nu,tau_min)
+        idx_tau_max = self._find_nearest(f_nu,tau_max)
+        idx_fD0 = self._find_nearest(f_t,0.)
+        
+        #create containers
+        kernel = np.empty_like(DynSpec)
+        DynSpec_deconv = np.empty_like(DynSpec)
+        SecSpec_deconv = np.empty_like(SecSpec)
+        
+        #perform the computation
+        Fkernel = np.zeros_like(SecSpec)
+        weights = np.zeros_like(f_t)
+        bar = progressbar.ProgressBar(maxval=idx_tau_max-idx_tau_min, widgets=[progressbar.Bar('=', '[', ']'), ' ', progressbar.Percentage()])
+        bar.start()
+        for i_tau in range(idx_tau_min,idx_tau_max+1):
+            bar.update(i_tau-idx_tau_min)
+            fD_pos = np.sqrt(f_nu[i_tau]/eta)
+            fD_neg = -np.sqrt(f_nu[i_tau]/eta)
+            arcpix_pos = self._find_nearest(f_t,fD_pos)
+            arcpix_neg = self._find_nearest(f_t,fD_neg)
+            weight_pos = np.abs(SecSpec[arcpix_pos,i_tau])
+            phase_pos = np.angle(SecSpec[arcpix_pos,i_tau])
+            weight_neg = np.abs(SecSpec[arcpix_neg,i_tau])
+            phase_neg = np.angle(SecSpec[arcpix_neg,i_tau])
+            for i_fD,fD in enumerate(f_t):
+                if fD<-fD_min:
+                    Fkernel[i_fD-arcpix_neg+idx_fD0,0] += SecSpec[i_fD,i_tau]*np.exp(-1.0j*phase_neg)
+                    weights[i_fD-arcpix_neg+idx_fD0] += weight_neg
+                elif fD>fD_min:
+                    Fkernel[i_fD-arcpix_pos+idx_fD0,0] += SecSpec[i_fD,i_tau]*np.exp(-1.0j*phase_pos)
+                    weights[i_fD-arcpix_pos+idx_fD0] += weight_pos
+        bar.finish()
+        weights[weights==0.] = 1.
+        Fkernel = Fkernel/weights[:,na]
+        #compute kernel to deconvolve
+        kernel = np.fft.ifft2(np.fft.ifftshift(Fkernel,axes=(0,1)))
+        kernel = kernel/np.mean(np.abs(kernel))
+        skernel = np.empty_like(kernel)
+        for i_tau in range(len(f_nu)):
+            skernel[:,i_tau] = np.convolve(kernel[:,i_tau], np.ones(3)/3, mode='same')
+        kernel[1:-2,:] = skernel[1:-2,:]
+        #deconvolve (using only phases)
+        DynSpec_deconv = DynSpec/kernel*np.abs(kernel)
+        SecSpec_deconv = np.fft.fftshift(np.fft.fft2(DynSpec_deconv),axes=(0,1))
+        
+        #save the results
+        self._add_result(kernel,"kernel")
+        self._add_result(DynSpec_deconv,"DynSpec_deconv")
+        self._add_result(SecSpec_deconv,"SecSpec_deconv")
+        
+    def SecSpec_fit_stripes(self):
+        #load and check data
+        DynSpec = self._load_base_file("DynSpec")
+        source = scinter_computation(self.dict_paths,"secondary_spectrum")
+        SecSpec,f_t,f_nu,SSphase = source.load_result(["secondary_spectrum","doppler","delay","Fourier_phase"])
+        
+        #load specifications
+        pos1 = self._add_specification("telescope1",0)
+        pos2 = self._add_specification("telescope2",0)
+        fD_min = self._add_specification("fD_min",0.5e-3)
+        tau_min = self._add_specification("tau_min",0.3e-6)
+        tau_max = self._add_specification("tau_max",4.0e-6)
+        eta = self._add_specification("curvature",0.08825745414070099)
+        flag_restart = self._add_specification("restart",False)
+        fitmethod = self._add_specification("fitmethod","combined")
+        #fD = self._add_specification("fD",float(np.sqrt(tau/0.08825745414070099)*np.sign(fD_min)))
+        
+        #preparation
+        # - take single dish for simplicity
+        DynSpec = np.real(DynSpec[pos1,pos2,:,:])
+        SecSpec = SecSpec[pos1,pos2,:,:]*np.exp(1.0j*SSphase[pos1,pos2,:,:])
+        # - sparate 2pi from the Fourier frequency
+        f_t /= 2.*math.pi
+        f_nu /= 2.*math.pi
+        # - get indices
+        #dft = f_t[1]-f_t[0]
+        #dfnu = f_nu[1]-f_nu[0]
+        idx_tau_min = self._find_nearest(f_nu,tau_min)
+        idx_tau_max = self._find_nearest(f_nu,tau_max)
+        idx_fD0 = self._find_nearest(f_t,0.)
+        idx_fD_min_neg = self._find_nearest(f_t,-fD_min)
+        idx_fD_min_pos = self._find_nearest(f_t,fD_min)
+        
+        #create containers
+        kernel = np.empty(self.N_t,dtype=complex)
+        DynSpec_deconv = np.empty_like(DynSpec)
+        DynSpec_multiplicator = np.empty_like(DynSpec)
+        SecSpec_deconv = np.empty_like(SecSpec)
+        
+        #perform the computation
+        N_im = 2*(idx_tau_max-idx_tau_min+1)
+        signal = np.empty(N_im,dtype=complex)
+        input = np.empty(N_im+self.N_t,dtype=complex)
+        input[0:N_im] = signal
+        input[N_im:] = kernel
+        is_tau_neg = np.arange(idx_tau_max,idx_tau_min-1,-1,dtype=int)
+        is_tau_pos = np.arange(idx_tau_min,idx_tau_max+1,1,dtype=int)
+        is_tau = np.concatenate((is_tau_neg,is_tau_pos))
+        arc_loc = np.empty((N_im,2),dtype=int)
+        for i_im,i_tau in enumerate(is_tau):
+            if i_im<N_im/2.:
+                arc_loc[i_im,0] = self._find_nearest(f_t,-np.sqrt(f_nu[i_tau]/eta))
+            else:
+                arc_loc[i_im,0] = self._find_nearest(f_t,np.sqrt(f_nu[i_tau]/eta))
+            arc_loc[i_im,1] = i_tau
+        
+        def func_for_min(input,SecSpec,arc_loc,N_im,idx_fD_min_neg,idx_fD_min_pos):
+            signal = input[0:N_im]+1.0j*input[N_im+self.N_t:2*N_im+self.N_t]
+            kernel = input[N_im:N_im+self.N_t]+1.0j*input[2*N_im+self.N_t:]
+            
+            fit = np.empty_like(SecSpec)
+            
+            #fit[arc_loc[:,0],arc_loc[:,1]] = signal
+            
+            for i_im in range(N_im):
+                fit[arc_loc[i_im,0],arc_loc[i_im,1]] = signal[i_im]
+            for i_im in range(int(N_im/2)):
+                fit[:,arc_loc[i_im,1]] = np.convolve(fit[:,arc_loc[i_im,1]],kernel[::-1],mode='same')
+                
+            diff = np.abs(SecSpec[:,np.min(arc_loc[:,1]):1+np.max(arc_loc[:,1])]-fit[:,np.min(arc_loc[:,1]):1+np.max(arc_loc[:,1])])**2
+            #diff = diff[:,np.min(arc_loc[:,1]):1+np.max(arc_loc[:,1])]
+            diff[idx_fD_min_neg:1+idx_fD_min_pos,:] = 0.
+            chi2 = np.sum(diff)
+            print(chi2)
+            
+            # - compute analytical gradient
+            grad = np.empty_like(input)
+            i_tau_min = np.min(arc_loc[:,1])
+            i_tau_max = np.max(arc_loc[:,1])
+            # - derivative with respect to signal
+            for i_im in range(N_im):
+                i_im_i = i_im+N_im+self.N_t
+                result_r = 0.+0.j
+                result_i = 0.+0.j
+                result_r = np.sum(SecSpec[:,arc_loc[i_im,1]]-fit[:,arc_loc[i_im,1]]*np.roll(kernel,-arc_loc[i_im,0]))
+                result_r += np.conj(result_r)
+                grad[i_im] = np.real(result_r)
+                result_i = np.sum(SecSpec[:,arc_loc[i_im,1]]-fit[:,arc_loc[i_im,1]]*np.roll(kernel,-arc_loc[i_im,0])*1.j)
+                result_i += np.conj(result_i)
+                grad[i_im_i] = np.real(result_i)
+            # - derivative with respect to kernel
+            for i_fD in range(self.N_t):
+                i_in_r = i_fD+N_im
+                i_in_i = i_fD+2*N_im+self.N_t
+                result_r = 0.+0.j
+                result_i = 0.+0.j
+                for i_im in range(N_im):
+                    i_fD_shifted = i_fD+arc_loc[i_im,0]
+                    if 0<i_fD_shifted<self.N_t:
+                        i_tau = arc_loc[i_im,1]
+                        result_r += (SecSpec[i_fD_shifted,i_tau]-fit[i_fD_shifted,i_tau])*signal[i_im]
+                        result_i += (SecSpec[i_fD_shifted,i_tau]-fit[i_fD_shifted,i_tau])*signal[i_im]*1.j
+                result_r += np.conj(result_r)
+                result_i += np.conj(result_i)
+                grad[i_in_r] = np.real(result_r)
+                grad[i_in_i] = np.real(result_i)
+                
+            return chi2,grad
+            
+        def func_combfit(input,SecSpec,arc_loc,signal0,idx_fD_min_neg,idx_fD_min_pos):
+            kernel = input[0:self.N_t]+1.0j*input[self.N_t:2*self.N_t]
+            fit = np.empty_like(SecSpec)
+            N_im = len(signal0)
+            signal = np.empty_like(signal0)
+            N_tau = int(N_im/2)
+            
+            for i_tau in range(N_tau):
+                data = np.concatenate((SecSpec[0:idx_fD_min_neg,arc_loc[i_tau,1]],SecSpec[idx_fD_min_pos:,arc_loc[i_tau,1]]))
+                sig1 = np.pad(kernel,((0,arc_loc[i_tau,0])), mode='constant')[arc_loc[i_tau,0]:]
+                fD1 = np.concatenate((sig1[0:idx_fD_min_neg],sig1[idx_fD_min_pos:]))
+                sig2 = np.pad(kernel,((arc_loc[i_tau,0],0)), mode='constant')[:-arc_loc[i_tau,0]]
+                fD2 = np.concatenate((sig2[0:idx_fD_min_neg],sig2[idx_fD_min_pos:]))
+                init1 = signal0[i_tau]
+                init2 = signal0[-i_tau-1]
+                signal[i_tau],signal[-i_tau-1] = self._fitfunc_for_linefit(data,fD1,fD2,init1,init2)
+            
+            for i_im in range(N_im):
+                fit[arc_loc[i_im,0],arc_loc[i_im,1]] = signal[i_im]
+            for i_im in range(int(N_im/2)):
+                fit[:,arc_loc[i_im,1]] = np.convolve(fit[:,arc_loc[i_im,1]],kernel[::-1],mode='same')
+                
+            diff = np.abs(SecSpec[:,np.min(arc_loc[:,1]):1+np.max(arc_loc[:,1])]-fit[:,np.min(arc_loc[:,1]):1+np.max(arc_loc[:,1])])**2
+            diff[idx_fD_min_neg:1+idx_fD_min_pos,:] = 0.
+            chi2 = np.sum(diff)
+            print(chi2)
+            
+            if 0:
+                # - compute analytical gradient
+                grad = np.empty_like(input)
+                # - derivative with respect to kernel
+                for i_fD in range(self.N_t):
+                    i_in_r = i_fD
+                    i_in_i = i_fD+self.N_t
+                    result_r = 0.+0.j
+                    result_i = 0.+0.j
+                    for i_im in range(N_im):
+                        i_fD_shifted = i_fD+arc_loc[i_im,0]
+                        if 0<i_fD_shifted<self.N_t:
+                            i_tau = arc_loc[i_im,1]
+                            result_r += (SecSpec[i_fD_shifted,i_tau]-fit[i_fD_shifted,i_tau])*signal[i_im]
+                            result_i += (SecSpec[i_fD_shifted,i_tau]-fit[i_fD_shifted,i_tau])*signal[i_im]*1.j
+                    result_r += np.conj(result_r)
+                    result_i += np.conj(result_i)
+                    grad[i_in_r] = np.real(result_r)
+                    grad[i_in_i] = np.real(result_i)
+                    
+                return chi2,grad
+            return chi2
+        
+        if flag_restart:
+            source = scinter_computation(self.dict_paths,"SecSpec_fit_stripes")
+            signal0,kernel0 = source.load_result(["signal","kernel"])
+        else:
+            signal0 = SecSpec[arc_loc[:,0],arc_loc[:,1]]/np.abs(SecSpec[arc_loc[:,0],arc_loc[:,1]])
+            kernel0 = np.fft.fftshift(np.fft.fft(np.mean(DynSpec,axis=1)))
+        if 1:
+            if fitmethod == "minimize_all":
+                v0 = np.concatenate((np.real(signal0),np.real(kernel0),np.imag(signal0),np.imag(kernel0)))
+                res = scipy.optimize.minimize(
+                    func_for_min, v0, args= (SecSpec,arc_loc,N_im,idx_fD_min_neg,idx_fD_min_pos),
+                    method="TNC", jac=True, options=dict(disp=True,return_all=True) )
+                signal = res.x[0:N_im]+1.0j*res.x[N_im+self.N_t:2*N_im+self.N_t]
+                kernel = res.x[N_im:N_im+self.N_t]+1.0j*res.x[2*N_im+self.N_t:]
+            elif fitmethod == "combined":
+                v0 = np.concatenate((np.real(kernel0),np.imag(kernel0)))
+                res = scipy.optimize.minimize(
+                    func_combfit, v0, args= (SecSpec,arc_loc,signal0,idx_fD_min_neg,idx_fD_min_pos),
+                    method="Powell", jac=False, options=dict(disp=True,return_all=True) )
+                #signal = res.x[0:N_im]+1.0j*res.x[N_im+self.N_t:2*N_im+self.N_t]
+                kernel = res.x[0:self.N_t]+1.0j*res.x[self.N_t:2*self.N_t]
+                N_tau = int(N_im/2)
+                signal = np.empty_like(signal0)
+                for i_tau in range(N_tau):
+                    data = np.concatenate((SecSpec[0:idx_fD_min_neg,arc_loc[i_tau,1]],SecSpec[idx_fD_min_pos:,arc_loc[i_tau,1]]))
+                    sig1 = np.pad(kernel,((0,arc_loc[i_tau,0])), mode='constant')[arc_loc[i_tau,0]:]
+                    fD1 = np.concatenate((sig1[0:idx_fD_min_neg],sig1[idx_fD_min_pos:]))
+                    sig2 = np.pad(kernel,((arc_loc[i_tau,0],0)), mode='constant')[:-arc_loc[i_tau,0]]
+                    fD2 = np.concatenate((sig2[0:idx_fD_min_neg],sig2[idx_fD_min_pos:]))
+                    init1 = signal0[i_tau]
+                    init2 = signal0[-i_tau-1]
+                    signal[i_tau],signal[-i_tau-1] = self._fitfunc_for_linefit(data,fD1,fD2,init1,init2)
+        else:
+            signal = signal0
+            kernel = kernel0
+        #later: fD_offset = np.zeros(N_im,dtype=int)
+        #for i_im in range(N_im):
+        #    SecSpec_deconv[arc_loc[i_im,0],arc_loc[i_im,1]] = signal[i_im]
+        DynSpec_multiplicator = np.ones((self.N_t,self.N_nu))*np.abs(np.fft.ifft(np.fft.ifftshift(kernel)))[:,na]
+        fit = np.empty_like(SecSpec)
+        for i_im in range(N_im):
+            fit[arc_loc[i_im,0],arc_loc[i_im,1]] = signal[i_im]
+        for i_im in range(int(N_im/2)):
+            fit[:,arc_loc[i_im,1]] = np.convolve(fit[:,arc_loc[i_im,1]],kernel[::-1],mode='same')
+        SecSpec_deconv = np.copy(SecSpec)
+        SecSpec_deconv[:,np.min(arc_loc[:,1]):1+np.max(arc_loc[:,1])] = fit[:,np.min(arc_loc[:,1]):1+np.max(arc_loc[:,1])]
+        SecSpec_deconv[idx_fD_min_neg:1+idx_fD_min_pos,:] = SecSpec[idx_fD_min_neg:1+idx_fD_min_pos,:]
+        DynSpec_deconv = np.abs(np.fft.ifft2(np.fft.ifftshift(SecSpec_deconv,axes=(0,1))))
+        
+        #save the results
+        self._add_result(kernel,"kernel")
+        self._add_result(signal,"signal")
+        self._add_result(DynSpec_deconv,"DynSpec_deconv")
+        self._add_result(DynSpec_multiplicator,"DynSpec_multiplicator")
+        self._add_result(SecSpec_deconv,"SecSpec_deconv")
+        
+    def _fitfunc_for_linefit(self,data,fD1,fD2,init1,init2):
+        #compute signal of point in tau
+        v1_r = np.real(init1)
+        v1_i = np.imag(init1)
+        v2_r = np.real(init2)
+        v2_i = np.imag(init2)
+        
+        fitto = np.concatenate((np.real(data),np.imag(data)))
+        input = np.concatenate((np.real(fD1),np.imag(fD1),np.real(fD2),np.imag(fD2)))
+        
+        def fitfunc(input,v1_r,v1_i,v2_r,v2_i):
+            N4 = len(input)
+            N1 = int(N4 /4)
+            N2 = int(2*N4 /4)
+            N3 = int(3*N4 /4)
+            result = (input[0:N1]+1.j*input[N1:N2])*(v1_r+1.j*v1_i) + (input[N2:N3]+1.j*input[N3:N4])*(v2_r+1.j*v2_i)
+            return np.concatenate((np.real(result),np.imag(result)))
+        
+        #print(v1_r,v1_i,v2_r,v2_i)
+        #print(input.shape,fitto.shape,v1_r.shape,v1_i.shape,v2_r.shape,v2_i.shape)
+        popt, pcov = curve_fit(fitfunc,input,fitto,p0=[v1_r,v1_i,v2_r,v2_i])
+        result1 = popt[0]+1.j*popt[1]
+        result2 = popt[2]+1.j*popt[3]
+        
+        return result1,result2
+        
+    def SecSpec_clean_deconvolution(self):
+        #load and check data
+        DynSpec = self._load_base_file("DynSpec")
+        source = scinter_computation(self.dict_paths,"secondary_spectrum")
+        SecSpec,f_t,f_nu,SSphase = source.load_result(["secondary_spectrum","doppler","delay","Fourier_phase"])
+        
+        #load specifications
+        pos1 = self._add_specification("telescope1",0)
+        pos2 = self._add_specification("telescope2",0)
+        fD_dev = self._add_specification("fD_deviation",0.5e-3)
+        tau_max = self._add_specification("tau_max",5.0e-6)
+        eta = self._add_specification("curvature",0.0926)
+        gain = self._add_specification("gain",0.5)
+        thresh = self._add_specification("threshold",pow(10.,3.5))
+        niter = self._add_specification("niter",100)
+        
+        #preparations
+        # - sparate 2pi from the Fourier frequency
+        f_t /= 2.*math.pi
+        f_nu /= 2.*math.pi
+        # - get complex secondary spectrum
+        SecSpec = SecSpec[pos1,pos2,:,:]*np.exp(1.j*SSphase[pos1,pos2,:,:])
+        # - create point spread function from center brightest pixel
+        psf = np.zeros_like(SecSpec)
+        center_t, center_nu = np.where(np.abs(SecSpec) == np.amax(np.abs(SecSpec)))
+        center_t = center_t[0]
+        center_nu = center_nu[0]
+        psf[:,center_nu-10:center_nu+11] = SecSpec[:,center_nu-10:center_nu+11]
+        psf[center_t,:] = SecSpec[center_t,:]
+        psf /= SecSpec[center_t,center_nu]
+        # - get indices
+        idx_tau_max = self._find_nearest(f_nu,tau_max)
+        idx_tau_min = self._find_nearest(f_nu,-tau_max)
+        # - create window function around arc
+        window = np.zeros(SecSpec.shape,dtype=bool)
+        bar = progressbar.ProgressBar(maxval=idx_tau_max-idx_tau_min, widgets=[progressbar.Bar('=', '[', ']'), ' ', progressbar.Percentage()])
+        bar.start()
+        for i_tau in range(idx_tau_min,idx_tau_max+1):
+            bar.update(i_tau-idx_tau_min)
+            for i_fD in range(self.N_t):
+                fD_arc = np.sqrt(np.abs(f_nu[i_tau])/eta)*np.sign(f_t[i_fD])
+                if fD_arc-fD_dev<f_t[i_fD]<fD_arc+fD_dev:
+                    window[i_fD,i_tau] = True
+        bar.finish()
+        
+        #create containers
+        SecSpec_clean = np.zeros_like(SecSpec)
+        
+        #perform the computation
+        def overlapIndices(a1, a2, shiftx, shifty):
+            if shiftx >=0:
+                a1xbeg=shiftx
+                a2xbeg=0
+                a1xend=a1.shape[0]
+                a2xend=a1.shape[0]-shiftx
+            else:
+                a1xbeg=0
+                a2xbeg=-shiftx
+                a1xend=a1.shape[0]+shiftx
+                a2xend=a1.shape[0]
+
+            if shifty >=0:
+                a1ybeg=shifty
+                a2ybeg=0
+                a1yend=a1.shape[1]
+                a2yend=a1.shape[1]-shifty
+            else:
+                a1ybeg=0
+                a2ybeg=-shifty
+                a1yend=a1.shape[1]+shifty
+                a2yend=a1.shape[1]
+            return (a1xbeg, a1xend, a1ybeg, a1yend), (a2xbeg, a2xend, a2ybeg, a2yend)
+        # - clean
+        dirty = SecSpec-psf*SecSpec[center_t,center_nu]
+        comps = np.zeros(dirty.shape,dtype=complex)
+        comps[center_t,center_nu] = SecSpec[center_t,center_nu]
+        res = np.copy(dirty)
+        bar = progressbar.ProgressBar(maxval=niter, widgets=[progressbar.Bar('=', '[', ']'), ' ', progressbar.Percentage()])
+        bar.start()
+        for i in range(niter):
+            bar.update(i)
+            mx, my = np.unravel_index(np.abs(res[window]).argmax(), res.shape)
+            mval = res[mx, my]*gain
+            comps[mx, my] += mval
+            a1o, a2o = overlapIndices(dirty, psf, mx-int(dirty.shape[0]/2), my-int(dirty.shape[1]/2))
+            res[a1o[0]:a1o[1],a1o[2]:a1o[3]] -= psf[a2o[0]:a2o[1],a2o[2]:a2o[3]]*mval
+            if np.abs(res).max() < thresh:
+                break
+        bar.finish()
+        SecSpec_clean = comps
+        
+        #save the results
+        self._add_result(SecSpec_clean,"SecSpec_clean")
+        self._add_result(res,"residuals")
+        self._add_result(psf,"psf")
         
 ################### series of secondary spectra ###################
         
@@ -1431,3 +1993,323 @@ class defined_computations():
         
         #save the results
         self._add_result(screen,"screen")
+        
+################### fD-th diagram ###################
+
+    def thfD_diagram(self):
+        #load and check data
+        source = scinter_computation(self.dict_paths,"secondary_spectrum")
+        SSpec,f_t,f_nu = source.load_result(["secondary_spectrum","doppler","delay"])
+        
+        #load specifications
+        N_th = self._add_specification("N_th",100)
+        delay_max = self._add_specification("delay_max",6.0e-6) #s
+        doppler_range = self._add_specification("doppler_range",2.0e-3) #Hz
+        D_eff = self._add_specification("D_eff",137.9) #pc
+        v_eff = self._add_specification("v_eff",61.58) #km/s
+        #th_offset = self._add_specification("th_offset",0.0) #mas
+        pos1 = self._add_specification("telescope1",0)
+        pos2 = self._add_specification("telescope2",0)
+        flag_rNoise = self._add_specification("flag_remove_noise",True)
+        
+        #preparations
+        D_eff *= self.pc
+        v_eff *= 1000.
+        delay_max *= 2.*math.pi
+        doppler_range *= 2.*math.pi
+        SSpec = np.abs(SSpec[pos1,pos2,:,:])
+        noise = np.median(SSpec)
+        dfd = f_t[1]-f_t[0]
+        N_fd = int(np.ceil(doppler_range/dfd/2.))
+        theta_max = np.sqrt(2.*self.LightSpeed*delay_max/D_eff/(2.*math.pi))
+        thetas = np.linspace(-theta_max,theta_max,num=N_th,endpoint=True)
+        dth = thetas[1]-thetas[0]
+        thetas_u = thetas+dth/2.
+        thetas_l = thetas-dth/2.
+        taus = -np.sign(thetas)*D_eff/(2.*self.LightSpeed)*thetas**2*2.*math.pi
+        taus_u = -np.sign(thetas_l)*D_eff/(2.*self.LightSpeed)*thetas_l**2*2.*math.pi
+        taus_l = -np.sign(thetas_u)*D_eff/(2.*self.LightSpeed)*thetas_u**2*2.*math.pi
+        fD_c = -self.nu_half/self.LightSpeed*np.abs(v_eff*thetas)*2.*math.pi
+        for i,tau in enumerate(taus):
+            if tau < 0.:
+                taus[i] *= -1.
+                taus_u[i] += taus[i]-tau
+                taus_l[i] += taus[i]-tau
+                fD_c[i] *= -1.
+        fD_u = fD_c + N_fd*dfd
+        fD_l = fD_c - N_fd*dfd
+        # - get pixel boundaries of SS
+        dfd = f_t[1]-f_t[0]
+        lfd = f_t - dfd/2.
+        rfd = f_t + dfd/2.
+        dtau = f_nu[1]-f_nu[0]
+        ltau = f_nu - dtau/2.
+        rtau = f_nu + dtau/2.
+        
+        #create containers
+        thfD = np.zeros((N_th,2*N_fd+1),dtype=float)
+        fDs = np.linspace(-N_fd*dfd,N_fd*dfd,num=2*N_fd+1,dtype=float)
+        
+        #perform the computation
+        # - main computation
+        bar = progressbar.ProgressBar(maxval=N_th, widgets=[progressbar.Bar('=', '[', ']'), ' ', progressbar.Percentage()])
+        bar.start()
+        for i_th in range(N_th):
+            bar.update(i_th)
+            # - determine indices of boundary pixels
+            i_tau_l = np.argmax(rtau>taus_l[i_th])
+            i_tau_u = np.argmax(rtau>taus_u[i_th])
+            # - determine indices of f_D range
+            i_fD_l = np.argmax(rfd>fD_l[i_th])
+            i_fD_u = np.argmax(rfd>fD_u[i_th])
+            # - sum pixels
+            for i_tau in range(i_tau_l,i_tau_u+1):
+                length = (np.min([taus_u[i_th],rtau[i_tau]])-np.max([taus_l[i_th],ltau[i_tau]]))/dtau
+                thfD[i_th,:] += SSpec[i_fD_l:i_fD_u+1,i_tau]*length
+                if flag_rNoise:
+                    thfD[i_th,:] -= noise*length
+        bar.finish()
+        
+        #save the results
+        self._add_result(thetas,"thetas")
+        self._add_result(fDs,"fDs")
+        self._add_result(thfD,"thfD")
+    
+    def thfD_diagram_direct(self):
+        #load specifications
+        DS_source = self._add_specification("DS_source",None) #["DynSpec_connected", None, "DynSpec_connected"]
+        
+        #load and check data
+        if DS_source==None:
+            DynSpec = self._load_base_file("DynSpec")
+        else:
+            self._warning("Using {0} instead of unprocessed dynamic spectrum.".format(DS_source))
+            source = scinter_computation(self.dict_paths,DS_source[0])
+            DynSpec, = source.load_result([DS_source[2]])
+        
+        #load specifications
+        N_th = self._add_specification("N_th",400)
+        th_range = self._add_specification("th_range",[-5.,5.]) #mas
+        N_fD = self._add_specification("N_fD",11)
+        doppler_range = self._add_specification("doppler_range",2.0e-3) #Hz
+        D_eff = self._add_specification("D_eff",137.9) #pc
+        MJD_start = self._add_specification("MJD_start",58947.88607757718) #MJD
+        veff_par_file = self._add_specification("veff_par_file","/mnt/c/Ubuntu/MPIfR/scint_evolution/veff_par.npy")
+        veff_MJD_file = self._add_specification("veff_MJD_file","/mnt/c/Ubuntu/MPIfR/scint_evolution/veff_MJD.npy")
+        pos1 = self._add_specification("telescope1",0)
+        pos2 = self._add_specification("telescope2",0)
+        
+        #preparations
+        D_eff *= self.pc
+        v_eff = np.full(self.N_t,63953.92964502) #placeholder
+        table_veff_par = np.load(veff_par_file)
+        table_veff_MJD = np.load(veff_MJD_file)
+        table_veff_MJD = (table_veff_MJD-MJD_start)*24.*3600.
+        ip = interpolate.interp1d(table_veff_MJD,table_veff_par,kind='cubic',fill_value="extrapolate")
+        shift = np.zeros(self.N_t,dtype=float)
+        for i_t in range(self.N_t):
+            v_eff[i_t] = ip(self.t[i_t])
+            shift[i_t], err = scipy.integrate.quad(ip, self.t[0], self.t[i_t])
+        shift /= D_eff
+        #print(v_eff,shift/self.mas)
+        doppler_range *= 2.*math.pi
+        
+        #create containers
+        thfD = np.zeros((N_th,N_fD),dtype=float)
+        thetas = np.linspace(th_range[0],th_range[1],num=N_th,dtype=float,endpoint=True)*self.mas
+        fDs = np.linspace(-doppler_range/2.,doppler_range/2.,num=N_fD,dtype=float,endpoint=True)
+        
+        # #perform the computation
+        # factor_fD = -self.nu_half/self.LightSpeed*v_eff*self.t*2.*math.pi
+        # factor_tau = D_eff/2./self.LightSpeed*self.nu*2.*math.pi
+        # shift_term = factor_fD*shift
+        # DynSpec = DynSpec[pos1,pos2,:,:]*np.exp(1.j*shift_term[:,na])
+        # fD_term = np.exp(-1.j*(fDs[:,na]*self.t[na,:]))
+        # # - main computation
+        # bar = progressbar.ProgressBar(maxval=N_th, widgets=[progressbar.Bar('=', '[', ']'), ' ', progressbar.Percentage()])
+        # bar.start()
+        # for i_th in range(N_th):
+            # bar.update(i_th)
+            # DS = DynSpec*np.exp(-1.j*(factor_fD[:,na]*thetas[i_th] + factor_tau[na,:]*(thetas[i_th]-shift[:,na])**2))
+            # try:
+                # thfD[i_th,:] = np.abs(np.sum(DS*fD_term[:,:,na],axis=(1,2)))
+            # except:
+                # for i_fD in range(N_fD):
+                    # thfD[i_th,i_fD] = np.abs(np.sum(DS*fD_term[i_fD,:,na]))
+        # bar.finish()
+        
+        #perform the computation
+        interim = np.zeros((N_th,self.N_t),dtype=complex)
+        DS = DynSpec[pos1,pos2,:,:]
+        pre_tau = -1.j*D_eff/2./self.LightSpeed*self.nu*2.*math.pi
+        term_quad = (thetas[:,na]-shift[na,:])**2
+        bar = progressbar.ProgressBar(maxval=N_th+N_fD, widgets=[progressbar.Bar('=', '[', ']'), ' ', progressbar.Percentage()])
+        bar.start()
+        for i_th in range(N_th):
+            bar.update(i_th)
+            interim[i_th,:] = np.sum(DS*np.exp(pre_tau[na,:]*term_quad[i_th,:,na]),axis=1)
+        pre_fD = -self.nu_half/self.LightSpeed*v_eff*self.t*2.*math.pi
+        term_fD = np.exp(-1.j*pre_fD[na,:]*(thetas[:,na]-shift[na,:]))
+        interim = interim*term_fD
+        term_dfd = np.exp(-1.j*fDs[:,na]*self.t[na,:])
+        for i_fD in range(N_fD):
+            bar.update(N_th+i_fD)
+            thfD[:,i_fD] = np.abs(np.sum(interim[:,:]*term_dfd[na,i_fD,:],axis=1))
+        bar.finish()
+        
+        #save the results
+        self._add_result(thetas,"thetas")
+        self._add_result(fDs,"fDs")
+        self._add_result(thfD,"thfD")
+        
+    def thfD_line(self):
+        #load and check data
+        source = scinter_computation(self.dict_paths,"thfD_diagram")
+        thetas,fDs,thfD = source.load_result(["thetas","fDs","thfD"])
+        
+        #perform the computation
+        profile = np.median(thfD,axis=0)
+        profile -= np.min(profile)
+        profile /= np.sum(profile)
+        line = np.sum(thfD*profile[na,:],axis=1)
+        
+        #save the results
+        self._add_result(profile,"profile")
+        self._add_result(line,"line")
+        
+        
+################### deconvolution ###################
+
+    def Gini_deconvolution(self):
+        #load specifications
+        eta = self._add_specification("curvature",0.08825745414070099)
+        pos1 = self._add_specification("telescope1",0)
+        pos2 = self._add_specification("telescope2",0)
+        delay_max = self._add_specification("delay_max",4.0e-6) #s
+        delay_min = self._add_specification("delay_min",0.3e-6) #s
+        doppler_range = self._add_specification("doppler_range",1.0e-3) #Hz
+        method = self._add_specification("method","Powell")
+        maxiter = self._add_specification("maxiter",3)
+        t_sampling = self._add_specification("t_sampling",1)
+        nu_sampling = self._add_specification("nu_sampling",4)
+        init = self._add_specification("init","/mnt/c/Ubuntu/MPIfR/scinter_data/data/B1508_20200408/computations/Gini_deconvolution/multiplicator.npy")
+        print(method)
+        
+        #load and check data
+        DSpec = self._load_base_file("DynSpec")
+        #source = scinter_computation(self.dict_paths,"secondary_spectrum")
+        #SSpec,f_t,f_nu = source.load_result(["secondary_spectrum","doppler","delay"])
+        
+        #preparations
+        dynspec = np.abs(DSpec[pos1,pos2,:,:])
+        # - downsampling
+        dynspec = block_reduce(dynspec, block_size=(t_sampling,nu_sampling), func=np.mean)
+        coordinates = np.array([self.t,self.t])
+        coordinates = block_reduce(coordinates, block_size=(1,t_sampling), func=np.mean, cval=self.t[-1])
+        t = coordinates[0,:]
+        coordinates = np.array([self.nu,self.nu])
+        coordinates = block_reduce(coordinates, block_size=(1,nu_sampling), func=np.mean, cval=self.nu[-1])
+        nu = coordinates[0,:]
+        N_t = len(t)
+        N_nu = len(nu)
+        dt = t[1]-t[0]
+        dnu = nu[1]-nu[0]
+        A_DynSpec = np.fft.fft2(dynspec)
+        secspec = np.abs(np.fft.fftshift(A_DynSpec,axes=(0,1)))
+        f_t = np.fft.fftshift(np.fft.fftfreq(N_t,dt))*2.*math.pi
+        f_nu = np.fft.fftshift(np.fft.fftfreq(N_nu,dnu))*2.*math.pi
+        #secspec = SSpec[pos1,pos2,:,:]
+        delay_min *= 2.*math.pi
+        delay_max *= 2.*math.pi
+        doppler_range *= 2.*math.pi
+        dft = f_t[1]-f_t[0]
+        dfnu = f_nu[1]-f_nu[0]
+        lft = f_t - dft/2.
+        # - compute relevant indices
+        indices_tau = []
+        for i_fnu,fnu in enumerate(f_nu):
+            if (delay_min<fnu<delay_max) or (delay_min<-fnu<delay_max):
+                indices_tau.append(i_fnu)
+        indices_tau = np.array(indices_tau,dtype=int)
+        N_ft_half = int(doppler_range/(2.*dft))
+        N_ft = 2*N_ft_half+1
+        N_fnu = len(indices_tau)
+        indices_ft = np.empty((N_ft,N_fnu),dtype=int)
+        for i_tau,i_fnu in enumerate(indices_tau):
+            fnu = f_nu[i_fnu]
+            v_ft = fnu/eta
+            i_ft_mid = np.where(v_ft>lft)[0][-1]
+            indices_ft[:,i_tau] = range(i_ft_mid-N_ft_half,i_ft_mid+N_ft_half+1)
+        # def gini(x):
+            # # (Warning: This is a concise implementation, but it is O(n**2)
+            # # in time and memory, where n = len(x).  *Don't* pass in huge
+            # # samples!)
+            # # Mean absolute difference
+            # mad = np.abs(np.subtract.outer(x, x)).mean()
+            # # Relative mean absolute difference
+            # rmad = mad/np.mean(x)
+            # # Gini coefficient
+            # g = 0.5 * rmad
+            # return g
+        # - for reproducible results
+        np.random.seed (1234)
+        # function to minimize
+        def func_for_min(vector, dynspec,indices_tau,indices_ft):
+            #start = time.time()
+            N_ft,N_fnu = indices_ft.shape
+            # - compute the secondary spectrum
+            DynSpec = dynspec/vector[:,na]
+            #t_dec = time.time()-start
+            A_DynSpec = np.fft.fft2(DynSpec)
+            SecSpec = np.abs(np.fft.fftshift(A_DynSpec,axes=(0,1)))
+            #t_SS = time.time()-t_dec-start
+            
+            # - compute gini measure
+            measure = np.zeros(N_fnu,dtype=float)
+            for i_tau in range(N_fnu):
+                data = SecSpec[indices_ft[:,i_tau],indices_tau[i_tau]]
+                # - compute Gini index
+                mad = np.abs(np.subtract.outer(data, data)).mean()
+                rmad = mad/np.mean(data)
+                gini = 0.5 * rmad
+                measure[i_tau] = 1.-gini
+            #t_gini = time.time()-t_SS-t_dec-start
+
+            # full result:
+            f = np.sum(measure)
+            print(f) #,vector[0],vector[-1],t_dec,t_SS,t_gini
+            
+            return f
+        
+        #create containers
+        SS_deconv = np.zeros(secspec.shape,dtype=float)
+        DS_deconv = np.zeros(dynspec.shape,dtype=float)
+        multiplicator = np.zeros(N_t,dtype=float)
+        
+        #perform the computation
+        # - perform the minimization
+        if not init==None:
+            v0 = np.load(init)
+        else:
+            v0 = np.mean(dynspec,axis=1)
+        trust = N_fnu*1.0e-4
+        print(trust)
+        #bounds= scipy.optimize.Bounds (v0*0.01, v0*2.)
+        res = scipy.optimize.minimize(
+            func_for_min, v0, args= (dynspec,indices_tau,indices_ft),tol=trust,
+            method=method, jac=False, options=dict(disp=True,ftol=trust,return_all=True,maxiter=maxiter) )
+        multiplicator = res.x
+        multiplicator = multiplicator/np.mean(multiplicator)
+        DS_deconv = dynspec/multiplicator[:,na]
+        A_DynSpec = np.fft.fft2(DS_deconv)
+        SS_deconv = np.abs(np.fft.fftshift(A_DynSpec,axes=(0,1)))
+        
+        #save the results
+        self._add_result(DS_deconv,"DS_deconv")
+        self._add_result(t,"t")
+        self._add_result(nu,"nu")
+        self._add_result(f_t,"f_t")
+        self._add_result(f_nu,"f_nu")
+        self._add_result(SS_deconv,"SS_deconv")
+        self._add_result(multiplicator,"multiplicator")
+    

@@ -89,9 +89,9 @@ class Scintillation(defined_analyses):
                self.yaml.dump(dict_params,writefile)
                 
         #check for the model file
-        file_model = os.path.join(self.path_data,"model.yaml")
-        if not os.path.exists(file_model):
-            with open(file_model,'w') as writefile:
+        self.file_model = os.path.join(self.path_data,"model.yaml")
+        if not os.path.exists(self.file_model):
+            with open(self.file_model,'w') as writefile:
                 if "model" in dict_params:
                    self.yaml.dump(dict_params["model"],writefile)
                 else:
@@ -472,12 +472,23 @@ class Scintillation(defined_analyses):
                     filename = os.path.join(path_anim,"{0}_{1}.png".format(name_save,i_frame))
                     image = imageio.imread(filename)
                     writer.append_data(image) 
+                    
+#-----INTERNAL-----
     
     def _add_specification(self,spec_name,spec_value,dict_current):
         #log standard value if not yet existent and read current value
         if spec_name not in dict_current:
             dict_current.update({spec_name:spec_value})
         return dict_current[spec_name]
+        
+    def _load_add_specification(self,spec_name,spec_value,dict_current):
+        """
+        use like 'fDs = self._load_add_specification("source_fDs",["thfD_diagram",None,"fDs"],dict_subplot)'
+        """
+        source_location = self._add_specification(spec_name,spec_value,dict_current)
+        source = scinter_computation(self.dict_paths,source_location[0])
+        desired, = source.load_result([source_location[2]])
+        return desired
     
     def _load_base_file(self,file_name):
         file_base = os.path.join(self.path_data,"{0}.npy".format(file_name))
@@ -486,6 +497,7 @@ class Scintillation(defined_analyses):
     def _load_c_lib(self,file_name):
         file_c = os.path.join(self.path_c_source,"{0}.so".format(file_name))
         return ctypes.CDLL(file_c)
+        
                 
 #-----POSITIONS-----
                 
